@@ -1,9 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
+# R-Converter — Versione Portable (onefile)
+# Build: pyinstaller R-Converter_Portable.spec --noconfirm --clean
+
 from PyInstaller.utils.hooks import collect_all
 
 datas = []
 binaries = []
-hiddenimports = ['PIL', 'PIL.Image', 'PIL.ImageTk', 'cv2', 'numpy', 'windnd', 'windnd.windnd', 'ctypes', 'ctypes.wintypes']
+hiddenimports = [
+    'PIL', 'PIL.Image', 'PIL.ImageTk',
+    'cv2', 'numpy',
+    'windnd', 'windnd.windnd',
+    'ctypes', 'ctypes.wintypes',
+]
+
+# Raccogli tutto il pacchetto windnd (necessario per drag & drop)
 tmp_ret = collect_all('windnd')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
@@ -17,7 +27,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['matplotlib', 'scipy', 'pandas', 'pytest'],
+    excludes=['matplotlib', 'scipy', 'pandas', 'pytest', 'setuptools', 'wheel', 'pip'],
     noarchive=False,
     optimize=2,
 )
@@ -42,4 +52,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='icon.ico',
 )

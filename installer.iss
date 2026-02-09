@@ -3,7 +3,7 @@
 ; Richiede Inno Setup: https://jrsoftware.org/isinfo.php
 
 #define MyAppName "R-Converter"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.3.0"
 #define MyAppPublisher "R-Converter Team"
 #define MyAppURL "https://github.com/r-converter"
 #define MyAppExeName "R-Converter.exe"
@@ -26,8 +26,9 @@ OutputBaseFilename=R-Converter_Setup_v{#MyAppVersion}
 ; Compressione
 Compression=lzma2/ultra64
 SolidCompression=yes
-; Icona (opzionale)
-; SetupIconFile=icon.ico
+; Icona setup e uninstall
+SetupIconFile=icon.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
 ; Requisiti
 MinVersion=10.0
 ArchitecturesAllowed=x64compatible
@@ -53,9 +54,9 @@ Source: "dist\R-Converter\*"; DestDir: "{app}"; Flags: ignoreversion recursesubd
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: quicklaunchicon
 
 [Run]

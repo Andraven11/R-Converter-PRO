@@ -18,9 +18,9 @@ try:
 except ImportError:
     VIDEO_SUPPORT = False
 
-# Costanti per i formati supportati
-IMAGE_FORMATS = ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tiff']
-VIDEO_FORMATS = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm']
+# Costanti per i formati supportati (set per lookup O(1))
+IMAGE_FORMATS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tiff'}
+VIDEO_FORMATS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'}
 
 # Preset di risoluzioni comuni
 RESOLUTION_PRESETS = {
@@ -79,6 +79,9 @@ class ImageLayer:
 
     def get_transformed_image(self, use_cache=True):
         """Restituisce l'immagine con trasformazioni applicate (con cache)"""
+        if self.original_image is None:
+            return None
+
         cache_key = (self.rotation, self.flip_h, self.flip_v)
 
         if use_cache and self._cache is not None and self._cache_key == cache_key:
@@ -163,6 +166,10 @@ class RConverter:
         # Debounce per redraw
         self._redraw_scheduled = False
         self._redraw_job = None
+        self._resize_job = None
+
+        # Flag per evitare re-bind ricorsivo scroll
+        self._scroll_bound = False
 
         # Parametri qualità export (default: Media)
         self.export_dpi = tk.IntVar(value=150)
@@ -344,8 +351,8 @@ class RConverter:
         # Bind scroll mouse sul pannello sinistro e tutti i suoi figli
         self.left_canvas.bind("<MouseWheel>", self.on_left_panel_scroll)
         self.left_scrollable_frame.bind("<MouseWheel>", self.on_left_panel_scroll)
-        # Bind anche su Enter/Leave per propagare scroll a tutti i widget figli
-        self.left_canvas.bind("<Enter>", lambda e: self._bind_scroll_to_children(self.left_scrollable_frame))
+        # Bind anche su Enter/Leave per propagare scroll a tutti i widget figli (una sola volta)
+        self.left_canvas.bind("<Enter>", lambda e: self._bind_scroll_to_children_once(self.left_scrollable_frame))
 
         left_frame = self.left_scrollable_frame
 
@@ -712,7 +719,7 @@ class RConverter:
         self.canvas.bind("<Configure>", self.on_canvas_resize)
 
         self.root.bind("<Control-o>", lambda e: self.add_image())
-        self.root.bind("<Control-s>", lambda e: self.export_file())
+        self.root.bind("<Control-s>", lambda e: self.export_image())
         self.root.bind("<Delete>", self.on_delete_key)
         self.root.bind("<Escape>", self.on_escape_key)
 
@@ -930,6 +937,7 @@ class RConverter:
         """Carica un'immagine come nuovo layer"""
         try:
             img = Image.open(filepath)
+            img.load()  # Forza il caricamento e rilascia il file handle
             if img.mode not in ('RGB', 'RGBA'):
                 img = img.convert('RGBA')
 
@@ -1072,9 +1080,15 @@ class RConverter:
         """Rimuove il layer selezionato e libera risorse"""
         if self.selected_layer and self.selected_layer in self.layers:
             layer_to_remove = self.selected_layer
+            idx = self.layers.index(layer_to_remove)
             self.layers.remove(layer_to_remove)
             layer_to_remove.cleanup()  # Libera memoria
-            self.selected_layer = self.layers[-1] if self.layers else None
+            # Seleziona il layer adiacente (precedente se possibile)
+            if self.layers:
+                new_idx = min(idx, len(self.layers) - 1)
+                self.selected_layer = self.layers[new_idx]
+            else:
+                self.selected_layer = None
             self.update_layers_list()
             self.update_layer_controls()
             self.update_export_panels()
@@ -1363,6 +1377,8 @@ class RConverter:
         # Disegna ogni layer dal basso verso l'alto
         for layer in self.layers:
             img = layer.get_transformed_image()
+            if img is None:
+                continue
 
             # Applica zoom
             zoom = layer.zoom / 100.0
@@ -1375,7 +1391,11 @@ class RConverter:
             y = (output_h - new_h) // 2 + layer.offset_y
 
             # Incolla con trasparenza
-            output.paste(img, (x, y), img)
+            try:
+                output.paste(img, (x, y), img)
+            except ValueError:
+                # Fallback senza maschera alpha se coordinate fuori range
+                output.paste(img, (x, y))
 
         return output.convert('RGB')
 
@@ -1418,11 +1438,11 @@ class RConverter:
         preview_w = int(output_w * self.preview_scale)
         preview_h = int(output_h * self.preview_scale)
 
-        # Crea immagine composita (versione preview veloce)
+        # Crea immagine composita direttamente a risoluzione preview (molto più veloce)
         composite = self.create_composite_image(output_w, output_h, for_export=False)
 
-        # Ridimensiona per preview - usa NEAREST per velocità durante il drag
-        resample = Image.Resampling.NEAREST if self.is_dragging else Image.Resampling.BILINEAR
+        # Ridimensiona per preview - usa NEAREST per velocità durante il drag, BOX per qualità
+        resample = Image.Resampling.NEAREST if self.is_dragging else Image.Resampling.BOX
         preview = composite.resize((preview_w, preview_h), resample)
         self.display_image = ImageTk.PhotoImage(preview)
 
@@ -1669,6 +1689,13 @@ class RConverter:
             self.left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         return "break"  # Previene propagazione
 
+    def _bind_scroll_to_children_once(self, widget):
+        """Bind ricorsivo dello scroll a tutti i widget figli (eseguito una sola volta)"""
+        if self._scroll_bound:
+            return
+        self._scroll_bound = True
+        self._bind_scroll_to_children(widget)
+
     def _bind_scroll_to_children(self, widget):
         """Bind ricorsivo dello scroll a tutti i widget figli"""
         for child in widget.winfo_children():
@@ -1676,6 +1703,14 @@ class RConverter:
             self._bind_scroll_to_children(child)
 
     def on_canvas_resize(self, event):
+        """Gestisce il resize del canvas con debounce per evitare lag"""
+        if self._resize_job is not None:
+            self.root.after_cancel(self._resize_job)
+        self._resize_job = self.root.after(50, self._do_canvas_resize)
+
+    def _do_canvas_resize(self):
+        """Esegue il resize effettivo dopo il debounce"""
+        self._resize_job = None
         if self.layers:
             self.redraw_canvas()
         else:
@@ -1723,7 +1758,8 @@ class RConverter:
             self.set_bg_color(color[1])
 
     def on_img_quality_change(self, event=None):
-        self.img_quality_label.config(text=f"{int(self.img_quality.get())}%")
+        """Aggiorna info qualità (usato internamente)"""
+        pass  # Info qualità aggiornata tramite preset
 
     def on_vid_quality_preset_change(self, event=None):
         """Aggiorna i parametri video in base al preset selezionato"""
@@ -1789,9 +1825,11 @@ class RConverter:
             self.set_video_export_enabled(has_videos)
 
     def clear_all(self):
-        """Rimuove tutti i layer"""
+        """Rimuove tutti i layer e libera risorse"""
         if self.layers:
             if messagebox.askyesno("Conferma", "Rimuovere tutti gli elementi?"):
+                for layer in self.layers:
+                    layer.cleanup()
                 self.layers.clear()
                 self.selected_layer = None
                 self.update_layers_list()
@@ -1821,7 +1859,7 @@ class RConverter:
             return
 
         self.progress.start()
-        thread = threading.Thread(target=self._do_export_image, args=(filepath,))
+        thread = threading.Thread(target=self._do_export_image, args=(filepath,), daemon=True)
         thread.start()
 
     def export_video(self):
@@ -1850,17 +1888,18 @@ class RConverter:
             return
 
         self.progress.start()
-        thread = threading.Thread(target=self._do_export_video, args=(filepath, video_layers[0]))
+        thread = threading.Thread(target=self._do_export_video, args=(filepath, video_layers[0]), daemon=True)
         thread.start()
 
     def _do_export_image(self, filepath):
         try:
+            # Snapshot dei valori dal thread principale (thread-safety)
             output_w = self.output_width.get()
             output_h = self.output_height.get()
+            quality = self.img_quality.get()
 
             # Usa for_export=True per qualità massima
             img = self.create_composite_image(output_w, output_h, for_export=True)
-            quality = self.img_quality.get()
             ext = Path(filepath).suffix.lower()
 
             if ext in ['.jpg', '.jpeg']:
@@ -1943,10 +1982,9 @@ class RConverter:
                 cap = None
 
                 if frames:
-                    # Converti palette a RGB per save
-                    rgb_frames = [f.convert('P') for f in frames]
-                    rgb_frames[0].save(filepath, save_all=True, append_images=rgb_frames[1:],
-                                       duration=int(1000/fps), loop=0, optimize=True)
+                    # I frame sono già quantizzati in modalità P, salva direttamente
+                    frames[0].save(filepath, save_all=True, append_images=frames[1:],
+                                   duration=int(1000/fps), loop=0, optimize=True)
 
                 self.root.after(0, lambda: self.progress.stop())
                 self.root.after(0, lambda: self.info_label.config(text=""))

@@ -9,6 +9,14 @@
 			"/^pip install Pillow opencv-python numpy$/": {
 				"approve": true,
 				"matchCommandLine": true
+			},
+			"/^Get-ChildItem \"c:\\\\Users\\\\andre\\\\Desktop\\\\Software Andrea\\\\R-Speaker- Telepromper\" -Recurse -File -ErrorAction SilentlyContinue \\| Where-Object \\{ \\$_\\.Extension -in '\\.ico','\\.png','\\.svg' \\} \\| ForEach-Object \\{ \\$_\\.FullName \\}$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^Get-ChildItem \"c:\\\\Users\\\\andre\\\\Desktop\\\\Software Andrea\\\\R-Converter\" -Recurse -File -ErrorAction SilentlyContinue \\| Where-Object \\{ \\$_\\.Extension -in '\\.ico','\\.png','\\.svg' \\} \\| ForEach-Object \\{ \\$_\\.FullName \\}$/": {
+				"approve": true,
+				"matchCommandLine": true
 			}
 		}
 	}

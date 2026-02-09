@@ -20,19 +20,19 @@ def install_pyinstaller():
         print("✓ PyInstaller installato")
 
 def build_executable():
-    """Crea l'eseguibile"""
+    """Crea l'eseguibile (versione installer - onedir)"""
     
     # Configurazione
     app_name = "R-Converter"
     main_script = "main.py"
-    icon_file = "icon.ico"  # Opzionale
+    icon_file = "icon.ico"
     
     # Comandi PyInstaller
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--name", app_name,
         "--windowed",  # No console window
-        "--onedir",    # Cartella portable (più veloce di --onefile)
+        "--onedir",    # Cartella (per installer)
         "--noconfirm", # Sovrascrivi senza chiedere
         "--clean",     # Pulisci cache
         
@@ -50,7 +50,7 @@ def build_executable():
         "--hidden-import", "ctypes",
         "--hidden-import", "ctypes.wintypes",
         
-        # Raccogli tutto il pacchetto windnd
+        # Raccogli tutto il pacchetto windnd (drag & drop)
         "--collect-all", "windnd",
         
         # Escludi moduli non necessari per ridurre dimensioni
@@ -65,10 +65,12 @@ def build_executable():
         main_script
     ]
     
-    # Aggiungi icona se esiste
+    # Aggiungi icona
     if os.path.exists(icon_file):
         cmd.insert(-1, "--icon")
         cmd.insert(-1, icon_file)
+    else:
+        print(f"⚠ Icona '{icon_file}' non trovata, build senza icona")
     
     print(f"\nCreazione {app_name}.exe...")
     print("Questo può richiedere alcuni minuti...\n")
@@ -115,10 +117,11 @@ Per problemi o suggerimenti, visita il repository del progetto.
         pass
 
 def build_single_file():
-    """Crea un singolo eseguibile (più lento all'avvio ma più comodo)"""
+    """Crea un singolo eseguibile portable (più lento all'avvio ma più comodo)"""
     
     app_name = "R-Converter"
     main_script = "main.py"
+    icon_file = "icon.ico"
     
     cmd = [
         sys.executable, "-m", "PyInstaller",
@@ -142,8 +145,18 @@ def build_single_file():
         "--exclude-module", "scipy",
         "--exclude-module", "pandas",
         "--exclude-module", "pytest",
+        "--exclude-module", "setuptools",
+        "--exclude-module", "wheel",
+        "--exclude-module", "pip",
         main_script
     ]
+    
+    # Aggiungi icona
+    if os.path.exists(icon_file):
+        cmd.insert(-1, "--icon")
+        cmd.insert(-1, icon_file)
+    else:
+        print(f"⚠ Icona '{icon_file}' non trovata, build senza icona")
     
     print(f"\nCreazione {app_name}_Portable.exe (singolo file)...")
     print("Questo può richiedere diversi minuti...\n")
