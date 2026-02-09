@@ -1,0 +1,11 @@
+# R-Converter - Dipendenze
+# Installa con: pip install -r requirements.txt
+
+# Elaborazione immagini
+Pillow>=10.0.0
+
+# Elaborazione video (opzionale ma consigliato)
+opencv-python>=4.8.0
+
+# Supporto array per video processing
+numpy>=1.24.0
