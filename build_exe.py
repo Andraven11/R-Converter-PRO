@@ -49,8 +49,6 @@ def build_executable():
         "--hidden-import", "windnd.windnd",
         "--hidden-import", "ctypes",
         "--hidden-import", "ctypes.wintypes",
-        
-        # Raccogli tutto il pacchetto windnd (drag & drop)
         "--collect-all", "windnd",
         
         # Escludi moduli non necessari per ridurre dimensioni
@@ -116,8 +114,8 @@ Per problemi o suggerimenti, visita il repository del progetto.
     except:
         pass
 
-def build_single_file():
-    """Crea un singolo eseguibile portable (più lento all'avvio ma più comodo)"""
+def build_portable():
+    """Crea un singolo eseguibile portable (.exe unico, nessuna cartella)"""
     
     app_name = "R-Converter"
     main_script = "main.py"
@@ -190,8 +188,8 @@ def main():
     print("  R-Converter - Build Tool")
     print("=" * 50)
     print("\nOpzioni:")
-    print("1. Crea versione Portable (cartella)")
-    print("2. Crea singolo file .exe")
+    print("1. Crea versione Installer (cartella per Inno Setup)")
+    print("2. Crea versione Portable (singolo .exe)")
     print("3. Crea entrambe le versioni")
     print("4. Pulisci file di build")
     print("0. Esci")
@@ -206,10 +204,10 @@ def main():
     if choice == "1":
         build_executable()
     elif choice == "2":
-        build_single_file()
+        build_portable()
     elif choice == "3":
         build_executable()
-        build_single_file()
+        build_portable()
     elif choice == "4":
         clean_build()
     else:

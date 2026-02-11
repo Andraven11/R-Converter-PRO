@@ -10,13 +10,45 @@ import threading
 import math
 from pathlib import Path
 import uuid
+import sys
+import os
+import logging
+import gc
+
+# Configura logging (solo su file in temp user, non nella cartella dell'exe)
+def _get_log_path():
+    """Restituisce il percorso del file di log in una posizione non invasiva"""
+    # Usa la cartella AppData/Local per il log, non la cartella dell'exe
+    if sys.platform == 'win32':
+        appdata = os.environ.get('LOCALAPPDATA', os.path.expanduser('~'))
+        log_dir = Path(appdata) / 'R-Converter'
+    else:
+        log_dir = Path.home() / '.r-converter'
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Fallback: cartella temp di sistema
+        import tempfile
+        log_dir = Path(tempfile.gettempdir())
+    return log_dir / 'r_converter.log'
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(_get_log_path(), encoding='utf-8', errors='replace'),
+    ]
+)
+logger = logging.getLogger('R-Converter')
 
 try:
     import cv2
     import numpy as np
     VIDEO_SUPPORT = True
+    logger.info(f"OpenCV {cv2.__version__} caricato, supporto video attivo")
 except ImportError:
     VIDEO_SUPPORT = False
+    logger.info("OpenCV non disponibile, supporto video disattivato")
 
 # Costanti per i formati supportati (set per lookup O(1))
 IMAGE_FORMATS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tiff'}
@@ -730,48 +762,87 @@ class RConverter:
         self.canvas.bind("<Motion>", self.on_mouse_hover)
 
     def setup_drag_and_drop(self):
-        """Configura il drag and drop per file esterni"""
+        """Configura il drag and drop per file esterni.
+        
+        Usa windnd (Python puro, nessun subclassing pericoloso).
+        Fallback: tkinterdnd2.
+        Il setup è ritardato per assicurare che la finestra sia pronta.
+        """
+        self.drag_drop_enabled = False
+        # Ritarda il setup per dare tempo alla finestra di inizializzarsi
+        self.root.after(500, self._do_setup_drag_and_drop)
+
+    def _do_setup_drag_and_drop(self):
+        """Setup effettivo del drag and drop (chiamato dopo init finestra)"""
+        # Tentativo 1: windnd (affidabile su Windows, anche con PyInstaller onefile)
         try:
-            # Prova a usare tkinterdnd2 se disponibile
+            import windnd  # type: ignore[import-not-found]
+            windnd.hook_dropfiles(self.root, func=self._on_drop_windnd)
+            self.drag_drop_enabled = True
+            logger.info("Drag & Drop: windnd attivo")
+            return
+        except ImportError:
+            logger.info("windnd non installato, provo tkinterdnd2")
+        except Exception as e:
+            logger.warning(f"windnd fallito: {e}")
+
+        # Tentativo 2: tkinterdnd2
+        try:
             from tkinterdnd2 import DND_FILES  # type: ignore[import-not-found]
             self.canvas.drop_target_register(DND_FILES)
-            self.canvas.dnd_bind('<<Drop>>', self.on_drop_files)
+            self.canvas.dnd_bind('<<Drop>>', self._on_drop_tkdnd)
             self.drag_drop_enabled = True
+            logger.info("Drag & Drop: tkinterdnd2 attivo")
+            return
         except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"tkinterdnd2 fallito: {e}")
+
+        logger.warning("Drag & Drop non disponibile (installa windnd: pip install windnd)")
+
+    def _process_dropped_files(self, files):
+        """Processa la lista di file droppati (chiamato nel main thread Tk)"""
+        for filepath in files:
             try:
-                # Fallback Windows: usa windnd sulla finestra root
-                import windnd  # type: ignore[import-not-found]
-                # Hook sulla finestra principale (più affidabile del canvas)
-                windnd.hook_dropfiles(self.root, func=self.on_drop_windnd)
-                self.drag_drop_enabled = True
+                filepath = str(filepath).strip()
+                if not filepath or not os.path.isfile(filepath):
+                    logger.warning(f"File non valido nel drop: {filepath}")
+                    continue
+
+                ext = Path(filepath).suffix.lower()
+                if ext in VIDEO_FORMATS:
+                    self.load_video(filepath)
+                elif ext in IMAGE_FORMATS:
+                    self.load_image(filepath)
+                else:
+                    logger.info(f"Formato non supportato nel drop: {ext}")
             except Exception as e:
-                # Ultimo fallback: nessun drag and drop
-                self.drag_drop_enabled = False
-                print(f"Drag&Drop non disponibile: {e}")
+                logger.error(f"Errore elaborazione file droppato: {e}")
 
-    def on_drop_windnd(self, files):
-        """Gestisce il drop di file tramite windnd (Windows)"""
+    def _on_drop_windnd(self, files):
+        """Gestisce il drop di file tramite windnd"""
+        processed = []
         for filepath in files:
-            # windnd passa bytes su alcune versioni
-            if isinstance(filepath, bytes):
-                filepath = filepath.decode('utf-8')
-            filepath = filepath.strip('{}')
-            ext = Path(filepath).suffix.lower()
-            if ext in VIDEO_FORMATS:
-                self.load_video(filepath)
-            elif ext in IMAGE_FORMATS:
-                self.load_image(filepath)
+            try:
+                if isinstance(filepath, bytes):
+                    try:
+                        filepath = filepath.decode('utf-8')
+                    except UnicodeDecodeError:
+                        filepath = filepath.decode('cp1252', errors='replace')
+                processed.append(str(filepath).strip('{}').strip('"').strip("'"))
+            except Exception as e:
+                logger.error(f"Errore decodifica file windnd: {e}")
+        if processed:
+            self._process_dropped_files(processed)
 
-    def on_drop_files(self, event):
-        """Gestisce il drop di file nel canvas"""
-        files = self.root.tk.splitlist(event.data)
-        for filepath in files:
-            filepath = filepath.strip('{}')
-            ext = Path(filepath).suffix.lower()
-            if ext in VIDEO_FORMATS:
-                self.load_video(filepath)
-            elif ext in IMAGE_FORMATS:
-                self.load_image(filepath)
+    def _on_drop_tkdnd(self, event):
+        """Gestisce il drop di file tramite tkinterdnd2"""
+        try:
+            files = self.root.tk.splitlist(event.data)
+            self._process_dropped_files([f.strip('{}') for f in files])
+        except Exception as e:
+            logger.error(f"Errore on_drop_tkdnd: {e}")
 
     def init_canvas_preview(self):
         """Inizializza il canvas con la preview della risoluzione di default"""
@@ -936,6 +1007,11 @@ class RConverter:
     def load_image(self, filepath):
         """Carica un'immagine come nuovo layer"""
         try:
+            filepath = str(filepath)
+            if not os.path.isfile(filepath):
+                logger.warning(f"File non trovato: {filepath}")
+                return
+
             img = Image.open(filepath)
             img.load()  # Forza il caricamento e rilascia il file handle
             if img.mode not in ('RGB', 'RGBA'):
@@ -948,6 +1024,10 @@ class RConverter:
             output_w = self.output_width.get()
             output_h = self.output_height.get()
             img_w, img_h = img.size
+
+            if img_w == 0 or img_h == 0:
+                logger.warning(f"Immagine con dimensioni zero: {filepath}")
+                return
 
             # Calcola la scala per contenere l'immagine nell'output
             scale_x = output_w / img_w
@@ -974,7 +1054,10 @@ class RConverter:
             self.update_export_panels()
             self.redraw_canvas()
 
+            logger.info(f"Immagine caricata: {name} ({img_w}x{img_h}) zoom={fit_zoom}%")
+
         except Exception as e:
+            logger.error(f"Errore caricamento immagine {filepath}: {e}")
             messagebox.showerror("Errore", f"Impossibile caricare:\n{filepath}\n{str(e)}")
 
     def load_video(self, filepath):
@@ -983,7 +1066,13 @@ class RConverter:
             messagebox.showerror("Errore", "OpenCV non installato. Installa con: pip install opencv-python")
             return
 
+        cap = None
         try:
+            filepath = str(filepath)
+            if not os.path.isfile(filepath):
+                logger.warning(f"File video non trovato: {filepath}")
+                return
+
             cap = cv2.VideoCapture(filepath)
             if not cap.isOpened():
                 raise Exception("Impossibile aprire il video")
@@ -998,14 +1087,17 @@ class RConverter:
 
             # Ottieni info video
             fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps <= 0:
+                fps = 30.0  # Fallback sicuro
             frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             duration = frame_count / fps if fps > 0 else 0
 
             cap.release()
+            cap = None
 
             name = f"🎬{Path(filepath).stem[:15]}"
             layer = ImageLayer(img, name)
-            layer.video_path = filepath  # Salva il percorso video
+            layer.video_path = filepath
             layer.video_fps = fps
             layer.video_frames = frame_count
             layer.is_video = True
@@ -1014,6 +1106,10 @@ class RConverter:
             output_w = self.output_width.get()
             output_h = self.output_height.get()
             img_w, img_h = img.size
+
+            if img_w == 0 or img_h == 0:
+                logger.warning(f"Video con frame di dimensioni zero: {filepath}")
+                return
 
             scale_x = output_w / img_w
             scale_y = output_h / img_h
@@ -1035,8 +1131,14 @@ class RConverter:
             self.update_export_panels()
             self.redraw_canvas()
 
+            logger.info(f"Video caricato: {name} ({img_w}x{img_h}) {duration:.1f}s @ {fps:.0f}fps")
+
         except Exception as e:
+            logger.error(f"Errore caricamento video {filepath}: {e}")
             messagebox.showerror("Errore", f"Impossibile caricare video:\n{filepath}\n{str(e)}")
+        finally:
+            if cap is not None:
+                cap.release()
 
     def update_layers_list(self):
         """Aggiorna la lista dei layer"""
@@ -1367,6 +1469,10 @@ class RConverter:
             output_w, output_h: dimensioni output
             for_export: se True usa LANCZOS per qualità migliore
         """
+        # Protezione dimensioni minime
+        output_w = max(1, output_w)
+        output_h = max(1, output_h)
+
         # Sfondo
         bg_color = self.bg_color_var.get()
         output = Image.new('RGBA', (output_w, output_h), color=bg_color)
@@ -1376,26 +1482,33 @@ class RConverter:
 
         # Disegna ogni layer dal basso verso l'alto
         for layer in self.layers:
-            img = layer.get_transformed_image()
-            if img is None:
-                continue
-
-            # Applica zoom
-            zoom = layer.zoom / 100.0
-            new_w = max(1, int(img.size[0] * zoom))
-            new_h = max(1, int(img.size[1] * zoom))
-            img = img.resize((new_w, new_h), resample)
-
-            # Posizione
-            x = (output_w - new_w) // 2 + layer.offset_x
-            y = (output_h - new_h) // 2 + layer.offset_y
-
-            # Incolla con trasparenza
             try:
-                output.paste(img, (x, y), img)
-            except ValueError:
-                # Fallback senza maschera alpha se coordinate fuori range
-                output.paste(img, (x, y))
+                img = layer.get_transformed_image()
+                if img is None:
+                    continue
+
+                # Applica zoom
+                zoom = layer.zoom / 100.0
+                new_w = max(1, int(img.size[0] * zoom))
+                new_h = max(1, int(img.size[1] * zoom))
+                img = img.resize((new_w, new_h), resample)
+
+                # Posizione
+                x = (output_w - new_w) // 2 + layer.offset_x
+                y = (output_h - new_h) // 2 + layer.offset_y
+
+                # Incolla con trasparenza (gestisce coordinate fuori range)
+                try:
+                    output.paste(img, (x, y), img)
+                except ValueError:
+                    # Fallback: crop l'immagine all'area visibile
+                    try:
+                        output.paste(img, (x, y))
+                    except Exception:
+                        pass  # Layer completamente fuori dal canvas
+            except Exception as e:
+                logger.warning(f"Errore rendering layer {layer.name}: {e}")
+                continue
 
         return output.convert('RGB')
 
@@ -1894,9 +2007,12 @@ class RConverter:
     def _do_export_image(self, filepath):
         try:
             # Snapshot dei valori dal thread principale (thread-safety)
+            # NOTA: .get() su IntVar/StringVar è thread-safe in Tkinter CPython
             output_w = self.output_width.get()
             output_h = self.output_height.get()
             quality = self.img_quality.get()
+
+            logger.info(f"Export immagine: {output_w}x{output_h} -> {filepath}")
 
             # Usa for_export=True per qualità massima
             img = self.create_composite_image(output_w, output_h, for_export=True)
@@ -1911,9 +2027,13 @@ class RConverter:
             else:
                 img.save(filepath)
 
+            file_size = Path(filepath).stat().st_size
+            logger.info(f"Export completato: {file_size / 1024:.1f} KB")
+
             self.root.after(0, lambda: self.progress.stop())
             self.root.after(0, lambda: messagebox.showinfo("Successo", f"Collage salvato:\n{filepath}"))
         except Exception as ex:
+            logger.error(f"Errore export immagine: {ex}")
             self.root.after(0, lambda: self.progress.stop())
             self.root.after(0, lambda err=str(ex): messagebox.showerror("Errore", err))
 
@@ -1927,11 +2047,22 @@ class RConverter:
             fps = self.fps_var.get()
             ext = Path(filepath).suffix.lower()
 
+            logger.info(f"Export video: {output_w}x{output_h} @ {fps}fps -> {filepath}")
+
             cap = cv2.VideoCapture(video_layer.video_path)
             if not cap.isOpened():
                 raise Exception("Impossibile aprire il video sorgente")
 
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+            # Pre-calcola trasformazioni costanti (snapshot thread-safe)
+            needs_flip_h = video_layer.flip_h
+            needs_flip_v = video_layer.flip_v
+            rotation = video_layer.rotation
+            zoom = video_layer.zoom / 100.0
+            offset_x = video_layer.offset_x
+            offset_y = video_layer.offset_y
+            bg_color = self.bg_color_var.get()
 
             # Codec in base al formato
             if ext == '.mp4':
@@ -1941,25 +2072,16 @@ class RConverter:
             elif ext == '.webm':
                 fourcc = cv2.VideoWriter_fourcc(*'VP80')
             elif ext == '.gif':
-                # Per GIF usiamo un approccio diverso con ottimizzazione memoria
+                # Per GIF: processa a blocchi per limitare uso memoria
                 frames = []
                 frame_count = 0
+                GIF_MAX_FRAMES = 3000  # Limite sicurezza memoria
 
-                # Pre-calcola trasformazioni costanti
-                needs_flip_h = video_layer.flip_h
-                needs_flip_v = video_layer.flip_v
-                rotation = video_layer.rotation
-                zoom = video_layer.zoom / 100.0
-                offset_x = video_layer.offset_x
-                offset_y = video_layer.offset_y
-                bg_color = self.bg_color_var.get()
-
-                while True:
+                while frame_count < GIF_MAX_FRAMES:
                     ret, frame = cap.read()
                     if not ret:
                         break
 
-                    # Converti e processa frame
                     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     pil_frame = Image.fromarray(frame_rgb)
                     processed = self._process_video_frame_optimized(
@@ -1968,13 +2090,13 @@ class RConverter:
                         offset_x, offset_y, bg_color
                     )
 
-                    # Per GIF converti a palette per risparmiare memoria
+                    # Quantizza subito per risparmiare memoria (~75% in meno per frame)
                     frames.append(processed.quantize(colors=256, method=Image.Quantize.MEDIANCUT))
+                    del processed, pil_frame  # Rilascio esplicito
                     frame_count += 1
 
-                    # Aggiorna progress ogni 10 frame
                     if frame_count % 10 == 0:
-                        progress_pct = int((frame_count / total_frames) * 100)
+                        progress_pct = int((frame_count / max(total_frames, 1)) * 100)
                         self.root.after(0, lambda p=progress_pct:
                                        self.info_label.config(text=f"Esportazione GIF: {p}%"))
 
@@ -1982,10 +2104,13 @@ class RConverter:
                 cap = None
 
                 if frames:
-                    # I frame sono già quantizzati in modalità P, salva direttamente
                     frames[0].save(filepath, save_all=True, append_images=frames[1:],
-                                   duration=int(1000/fps), loop=0, optimize=True)
+                                   duration=int(1000 / max(fps, 1)), loop=0, optimize=True)
+                    # Rilascia memoria GIF
+                    del frames
+                    gc.collect()
 
+                logger.info(f"GIF esportata: {frame_count} frames")
                 self.root.after(0, lambda: self.progress.stop())
                 self.root.after(0, lambda: self.info_label.config(text=""))
                 self.root.after(0, lambda: messagebox.showinfo("Successo", f"GIF salvata:\n{filepath}\n{frame_count} frames"))
@@ -1997,15 +2122,6 @@ class RConverter:
             if not out.isOpened():
                 raise Exception("Impossibile creare il file video di output")
 
-            # Pre-calcola trasformazioni costanti
-            needs_flip_h = video_layer.flip_h
-            needs_flip_v = video_layer.flip_v
-            rotation = video_layer.rotation
-            zoom = video_layer.zoom / 100.0
-            offset_x = video_layer.offset_x
-            offset_y = video_layer.offset_y
-            bg_color = self.bg_color_var.get()
-
             frame_count = 0
 
             while True:
@@ -2013,34 +2129,32 @@ class RConverter:
                 if not ret:
                     break
 
-                # Converti frame
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 pil_frame = Image.fromarray(frame_rgb)
 
-                # Applica trasformazioni (versione ottimizzata)
                 processed = self._process_video_frame_optimized(
                     pil_frame, output_w, output_h,
                     needs_flip_h, needs_flip_v, rotation, zoom,
                     offset_x, offset_y, bg_color
                 )
 
-                # Converti a BGR per OpenCV
                 output_frame = cv2.cvtColor(np.array(processed), cv2.COLOR_RGB2BGR)
                 out.write(output_frame)
 
                 frame_count += 1
 
-                # Aggiorna progress ogni 30 frame
                 if frame_count % 30 == 0:
-                    progress_pct = int((frame_count / total_frames) * 100)
+                    progress_pct = int((frame_count / max(total_frames, 1)) * 100)
                     self.root.after(0, lambda p=progress_pct:
                                    self.info_label.config(text=f"Esportazione video: {p}%"))
 
+            logger.info(f"Video esportato: {frame_count} frames")
             self.root.after(0, lambda: self.progress.stop())
             self.root.after(0, lambda: self.info_label.config(text=""))
             self.root.after(0, lambda: messagebox.showinfo("Successo", f"Video salvato:\n{filepath}\n{frame_count} frames"))
 
         except Exception as ex:
+            logger.error(f"Errore export video: {ex}")
             self.root.after(0, lambda: self.progress.stop())
             self.root.after(0, lambda: self.info_label.config(text=""))
             self.root.after(0, lambda err=str(ex): messagebox.showerror("Errore", err))

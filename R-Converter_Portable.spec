@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
-# R-Converter — Versione Portable (onefile)
-# Build: pyinstaller R-Converter_Portable.spec --noconfirm --clean
+# R-Converter — Versione Portable (onefile = singolo .exe)
+# Build: python -m PyInstaller R-Converter_Portable.spec --noconfirm --clean
 
 from PyInstaller.utils.hooks import collect_all
 

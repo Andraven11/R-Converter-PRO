@@ -1,0 +1,92 @@
+---
+description: Regole generali per il progetto R-Converter
+globs:
+alwaysApply: true
+---
+
+# R-Converter - Regole Progetto
+
+## Architettura
+- Applicazione desktop Python/Tkinter single-file (`main.py`)
+- GUI: Tkinter con tema dark blue custom
+- Immagini: Pillow (PIL)
+- Video: OpenCV (cv2) - opzionale
+- Drag & Drop: windnd (hook su finestra root)
+- Build: PyInstaller (onedir per installer, onefile per portable)
+- Installer: Inno Setup
+- Versione: 1.3.1
+
+## Stack Tecnologico
+- Python 3.8+ (testato con 3.13)
+- Pillow >=10.0.0
+- opencv-python >=4.8.0 (opzionale)
+- numpy >=1.24.0
+- windnd >=1.0.7 (necessario per drag & drop)
+- PyInstaller >=5.0 (build)
+
+## Struttura Chiave
+- `main.py` - Codice sorgente completo (~2226 righe, 2 classi: ImageLayer, RConverter)
+- `R-Converter.spec` - Build spec per versione installer (onedir)
+- `R-Converter_Portable.spec` - Build spec per versione portable (onefile, singolo .exe)
+- `build_exe.py` - Script build interattivo (usa `python -m PyInstaller`)
+- `installer.iss` - Inno Setup per installer Windows (v1.3.1)
+- `requirements.txt` - Dipendenze Python (Pillow, opencv-python, numpy, windnd)
+- `_clean_and_build.bat` - Script batch per build completa (doppio click)
+
+## Regole di Sviluppo
+
+### Performance
+- SEMPRE usare `__slots__` nelle classi dati
+- Cache delle trasformazioni immagine con chiave (rotation, flip_h, flip_v)
+- Debounce di 16ms (~60fps) per il redraw del canvas
+- Resampling NEAREST durante drag, BOX per preview statica, LANCZOS per export
+- Thread separato per export (non bloccare mai la GUI)
+- Rilascio esplicito delle risorse (gc.collect per GIF, cap.release per video)
+
+### Stabilita
+- SEMPRE gestire le eccezioni nei callback Tkinter
+- SEMPRE rilasciare cv2.VideoCapture nel finally
+- SEMPRE validare i percorsi file prima di operare
+- SEMPRE usare logger (logging) al posto di print()
+- Protezione division-by-zero su dimensioni immagine/video
+- Limite sicurezza GIF: max 3000 frame per evitare OOM
+
+### GUI/UX
+- Tema: palette blu notte (#0a1929 base)
+- Font: Segoe UI per tutto
+- Emoji nelle label per orientamento visivo
+- Sezioni colorate (layers=blu, transform=scuro, size=teal, fit=viola, mirror=arancio)
+
+### Drag & Drop
+- Il D&D usa windnd (hook Python sulla finestra root di Tkinter)
+- MAI fare subclassing della window procedure Win32 (SetWindowLongPtrW) con Tkinter: causa crash immediato
+- Fallback: tkinterdnd2 (se windnd non disponibile)
+- Il setup e' ritardato di 500ms (root.after) per dare tempo alla finestra di inizializzarsi
+- windnd DEVE essere incluso nella build PyInstaller con collect_all('windnd')
+
+### Build
+- Versione installer: --onedir (cartella per Inno Setup)
+- Versione portable: --onefile (singolo .exe)
+- SEMPRE usare `python -m PyInstaller` (non il comando diretto `pyinstaller` che potrebbe non essere nel PATH)
+- windnd obbligatorio in entrambi i spec: collect_all('windnd')
+- Hidden imports obbligatori: PIL, PIL.Image, PIL.ImageTk, cv2, numpy, windnd, windnd.windnd, ctypes, ctypes.wintypes
+- Script batch `_clean_and_build.bat` per build rapida con doppio click
+
+### Logging
+- Il file di log va in `%LOCALAPPDATA%\R-Converter\r_converter.log`
+- MAI creare file nella cartella dell'exe (l'utente lo vede ed e' confuso)
+- Fallback: cartella temp di sistema
+
+### Thread Safety
+- .get() su IntVar/StringVar e' thread-safe in CPython
+- Snapshot dei valori PRIMA di entrare nel thread worker
+- Usare root.after(0, callback) per aggiornare la GUI dal thread
+
+## Anti-Pattern da Evitare
+- NO print() per debug -> usa logger
+- NO subclassing Win32 WNDPROC con Tkinter (SetWindowLongPtrW -> crash!)
+- NO operazioni PIL nel main thread durante export
+- NO import pesanti al top-level (cv2 e' opzionale)
+- NO accesso diretto a widget Tkinter da thread secondari
+- NO creare file log/temp nella cartella dell'exe (usare %LOCALAPPDATA%)
+- NO usare comando `pyinstaller` diretto (usare `python -m PyInstaller`)

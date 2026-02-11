@@ -1,0 +1,107 @@
+---
+description: Regole specifiche per main.py - il codice sorgente principale
+globs: "main.py"
+alwaysApply: false
+---
+
+# R-Converter - Regole per main.py
+
+## Struttura del File
+Il file `main.py` contiene tutto il codice sorgente (~2226 righe):
+
+1. **Imports, logging, costanti** (righe 1-77)
+   - Logging in %LOCALAPPDATA%\R-Converter\r_converter.log
+   - cv2 importato con try/except (opzionale)
+   - IMAGE_FORMATS, VIDEO_FORMATS (set per lookup O(1))
+   - RESOLUTION_PRESETS (dict con 12 preset)
+   - HANDLE_SIZE, HANDLE_COLOR, ROTATION_HANDLE_DISTANCE
+
+2. **ImageLayer** (classe dati, righe 80-153)
+   - Usa `__slots__` per efficienza memoria
+   - Cache trasformazioni con chiave (rotation, flip_h, flip_v)
+   - Metodo cleanup() per rilascio risorse
+
+3. **RConverter** (classe principale GUI, righe 156-2210)
+   - `__init__`: variabili stato, setup UI, D&D
+   - `setup_style`: tema dark blue con palette definita
+   - `create_widgets`: layout 3 colonne (left scrollabile / canvas / right)
+   - `setup_drag_and_drop`: windnd con setup ritardato 500ms, fallback tkinterdnd2
+   - Layer management: load_image, load_video, remove, move, duplicate
+   - Canvas rendering: create_composite_image + draw_selection_handles
+   - Mouse events: drag/resize/rotate con debounce
+   - Export: image (thread) + video (thread) con progress
+
+4. **main()** (righe 2212-2225)
+   - Entry point, centramento finestra
+
+## Pattern da Seguire
+
+### Aggiungere un nuovo controllo UI
+1. Creare widget nel metodo create_*_panel appropriato
+2. Collegare variabile Tkinter (IntVar/StringVar/BooleanVar)
+3. Aggiungere handler/callback con gestione errori
+4. Chiamare redraw_canvas() dopo modifiche visive
+
+### Aggiungere una nuova trasformazione layer
+1. Aggiungere attributo in ImageLayer.__slots__
+2. Inizializzare in ImageLayer.__init__
+3. Applicare in ImageLayer.get_transformed_image()
+4. Aggiornare cache_key se influenza il rendering
+5. Aggiungere controllo UI nel pannello sinistro
+6. Gestire in _process_video_frame_optimized per export video
+
+### Export in thread separato
+```python
+def export_something(self):
+    # Validazione nel main thread
+    if not self.layers:
+        return
+    self.progress.start()
+    thread = threading.Thread(target=self._do_export_something, args=(...,), daemon=True)
+    thread.start()
+
+def _do_export_something(self, ...):
+    try:
+        # Snapshot variabili (thread-safe)
+        output_w = self.output_width.get()
+        # ... lavoro pesante ...
+        logger.info("Export completato")
+        self.root.after(0, lambda: self.progress.stop())
+        self.root.after(0, lambda: messagebox.showinfo("Successo", "..."))
+    except Exception as ex:
+        logger.error(f"Errore: {ex}")
+        self.root.after(0, lambda: self.progress.stop())
+        self.root.after(0, lambda err=str(ex): messagebox.showerror("Errore", err))
+```
+
+### Drag & Drop
+- setup_drag_and_drop() schedula _do_setup_drag_and_drop() con after(500ms)
+- _do_setup_drag_and_drop() prova windnd, poi tkinterdnd2
+- _on_drop_windnd() decodifica bytes (utf-8/cp1252) e chiama _process_dropped_files()
+- _process_dropped_files() valida file e chiama load_image/load_video
+- MAI fare subclassing Win32 WNDPROC con Tkinter
+
+### Logging
+- `logger.info()` per operazioni normali (caricamento, export, D&D setup)
+- `logger.warning()` per situazioni anomale non bloccanti (file non valido, fallback)
+- `logger.error()` per errori che richiedono attenzione (crash D&D, export fallito)
+
+## Palette Colori
+```python
+bg_color      = "#0a1929"   # Sfondo principale
+bg_secondary  = "#132f4c"   # Sfondo secondario
+bg_tertiary   = "#1a3a5c"   # Hover
+fg_color      = "#e3f2fd"   # Testo primario
+fg_secondary  = "#90caf9"   # Testo secondario
+accent_color  = "#29b6f6"   # Accento cyan
+success_color = "#66bb6a"   # Verde export immagine
+video_color   = "#7c4dff"   # Viola export video
+border_color  = "#1e4976"   # Bordi
+
+# Sezioni pannello sinistro
+layers    = "#1a365d" / "#3182ce"   # Blu navy / bordo blu
+transform = "#0f2840" / "#1e88e5"   # Blu scuro / bordo blu
+size      = "#1e4a3d" / "#26a69a"   # Teal scuro / bordo teal
+fit       = "#2d1f47" / "#7c4dff"   # Viola scuro / bordo viola
+mirror    = "#3d2a1f" / "#ff7043"   # Marrone / bordo arancio
+```

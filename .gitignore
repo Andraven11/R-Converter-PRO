@@ -50,3 +50,9 @@ exports/
 # PyInstaller
 build/
 dist/
+installer_output/
+
+# Script di build temporanei
+_*.bat
+_*.py
+_*.txt
