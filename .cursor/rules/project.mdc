@@ -6,6 +6,22 @@ alwaysApply: true
 
 # R-Converter - Regole Progetto
 
+## Regole per contesto
+- **project.mdc** (questo): sempre attivo
+- **git-autonomy.mdc**: sempre attivo (commit/push)
+- **build.mdc**: quando si modificano *.spec, installer.iss, *.bat, build_exe.py
+- **main-py.mdc**: quando si modifica main.py
+
+## Comunicazione e Workflow
+- Rispondere SEMPRE in italiano, linguaggio chiaro
+- Formato risposta: Cosa ho fatto → File modificati → Comandi (se serve) → Attenzione (solo se breaking)
+- Se vedi errori nel codice: segnalarli PRIMA di procedere
+- Richiesta ambigua: max 3 domande specifiche
+- Dipendenza mancante: aggiungere a requirements.txt e avvisare
+
+## Refactoring
+Prima di refactor complesso, elencare: (1) File da modificare (2) Funzionalita impattate (3) Test consigliati. Se puo rompere produzione: chiedere conferma esplicita. Procedere per step incrementali.
+
 ## Architettura
 - Applicazione desktop Python/Tkinter single-file (`main.py`)
 - GUI: Tkinter con tema dark blue custom
@@ -24,72 +40,45 @@ alwaysApply: true
 - windnd >=1.0.7 (necessario per drag & drop)
 - PyInstaller >=5.0 (build)
 
-## Struttura Chiave
-- `main.py` - Codice sorgente completo (~2250 righe, 2 classi: ImageLayer, RConverter)
-- `docs/PERFORMANCE_IMPROVEMENTS.md` - Documento suggerimenti performance e stabilita
-- `R-Converter.spec` - Build spec per versione installer (onedir)
-- `R-Converter_Portable.spec` - Build spec per versione portable (onefile, singolo .exe)
-- `build_exe.py` - Script build interattivo (usa `python -m PyInstaller`)
-- `installer.iss` - Inno Setup per installer Windows (v1.3.1)
-- `requirements.txt` - Dipendenze Python (Pillow, opencv-python, numpy, windnd)
-- `_clean_and_build.bat` - Script batch per build completa (doppio click)
+## Struttura
+- `main.py` - Sorgente unico (~2250 righe)
+- `docs/` - PERFORMANCE_IMPROVEMENTS.md, CURSOR_GIT_SETUP.md
+- `_clean_and_build.bat` - Build completa (installer+portable+setup). `_build_setup.bat` - Solo setup (richiede dist/R-Converter/)
+- `icon.ico` - Obbligatorio in root per spec
+- `.gitignore`: _*.bat, _*.py eccetto _build_setup, _clean_and_build
 
 ## Regole di Sviluppo
 
 ### Performance
-- SEMPRE usare `__slots__` nelle classi dati
-- Cache trasformazioni: (rotation, flip_h, flip_v) + cache zoom (evita resize ripetuti durante pan)
-- Compositing preview: create_composite_image con target_size=(preview_w, preview_h) - mai full resolution
-- Debounce: 16ms (~60fps) normale, 33ms (~30fps) durante drag (evita accumulo eventi)
-- Cache dimensioni canvas: _cached_canvas_size, update_idletasks solo se cache invalida
-- Oggetti canvas riutilizzabili: _canvas_persistent_ids per bg/img/border, tag "handles" per handle
-- Resampling: NEAREST per preview, LANCZOS per export
-- Thread separato per export (non bloccare mai la GUI)
-- Rilascio esplicito delle risorse (gc.collect per GIF, cap.release per video)
+- __slots__, cache trasformazioni+zoom, compositing a target_size preview, debounce 16/33ms, _cached_canvas_size, oggetti canvas riutilizzabili. NEAREST preview, LANCZOS export. Export in thread.
 
 ### Stabilita
-- SEMPRE gestire le eccezioni nei callback Tkinter
-- SEMPRE rilasciare cv2.VideoCapture nel finally
-- SEMPRE validare i percorsi file prima di operare
-- SEMPRE usare logger (logging) al posto di print()
-- Protezione division-by-zero su dimensioni immagine/video
-- Limite sicurezza GIF: max 3000 frame per evitare OOM
+- Eccezioni nei callback, cv2.VideoCapture in finally, validare percorsi, logger (no print), division-by-zero, GIF max 3000 frame.
 
 ### GUI/UX
-- Tema: palette blu notte (#0a1929 base)
-- Font: Segoe UI per tutto
-- Emoji nelle label per orientamento visivo
-- Sezioni colorate (layers=blu, transform=scuro, size=teal, fit=viola, mirror=arancio)
+- Tema blu notte (#0a1929), Segoe UI, emoji, sezioni colorate.
 
-### Drag & Drop
-- Il D&D usa windnd (hook Python sulla finestra root di Tkinter)
-- MAI fare subclassing della window procedure Win32 (SetWindowLongPtrW) con Tkinter: causa crash immediato
-- Fallback: tkinterdnd2 (se windnd non disponibile)
-- Il setup e' ritardato di 500ms (root.after) per dare tempo alla finestra di inizializzarsi
-- windnd DEVE essere incluso nella build PyInstaller con collect_all('windnd')
+### Drag & Drop (CRITICO per build portable)
+- windnd (hook Python sulla finestra root) - funziona con --onefile perche' e' Python puro (no DLL native)
+- MAI subclassing Win32 WNDPROC (SetWindowLongPtrW): crasha Tkinter immediatamente
+- Fallback: tkinterdnd2 se windnd non disponibile
+- Setup ritardato 500ms (root.after) per dare tempo alla finestra di inizializzarsi
+- collect_all('windnd') OBBLIGATORIO in entrambi i spec (installer e portable)
+- Hidden imports: windnd, windnd.windnd, ctypes, ctypes.wintypes
 
-### Build
-- Versione installer: --onedir (cartella per Inno Setup)
-- Versione portable: --onefile (singolo .exe)
-- SEMPRE usare `python -m PyInstaller` (non il comando diretto `pyinstaller` che potrebbe non essere nel PATH)
-- windnd obbligatorio in entrambi i spec: collect_all('windnd')
-- Hidden imports obbligatori: PIL, PIL.Image, PIL.ImageTk, cv2, numpy, windnd, windnd.windnd, ctypes, ctypes.wintypes
-- Script batch `_clean_and_build.bat` per build rapida con doppio click
+### Build portable funzionante
+- `python -m PyInstaller` (non pyinstaller diretto)
+- Spec: collect_all('windnd'), hidden imports PIL/cv2/numpy/windnd
+- Portable (onefile): R-Converter_Portable.spec -> dist/R-Converter_Portable.exe
+- D&D funziona nella portable grazie a windnd Python puro. Vedi build.mdc per dettagli.
 
-### Logging
-- Il file di log va in `%LOCALAPPDATA%\R-Converter\r_converter.log`
-- MAI creare file nella cartella dell'exe (l'utente lo vede ed e' confuso)
-- Fallback: cartella temp di sistema
+### Logging / Thread / File
+- Log: %LOCALAPPDATA%\R-Converter\r_converter.log. Mai file nella cartella exe (utente confuso)
+- output/, exports/ in .gitignore (export utente)
+- Snapshot variabili prima del thread. root.after(0, callback) per aggiornare GUI. gc.collect per GIF, cap.release per video.
 
-### Thread Safety
-- .get() su IntVar/StringVar e' thread-safe in CPython
-- Snapshot dei valori PRIMA di entrare nel thread worker
-- Usare root.after(0, callback) per aggiornare la GUI dal thread
-
-### Git (autonomia)
-- Dopo modifiche sostanziali: eseguire SEMPRE `git add -A`, `git commit`, `git push`
-- Richiedere permesso `network` per git push
-- Vedi `.cursor/rules/git-autonomy.mdc` per dettagli
+### Git
+- Commit e push: `git add -A && git commit -m "messaggio" && git push` (vedi git-autonomy.mdc)
 
 ## Anti-Pattern da Evitare
 - NO print() per debug -> usa logger

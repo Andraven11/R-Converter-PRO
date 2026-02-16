@@ -11,7 +11,8 @@ alwaysApply: false
 IMPORTANTE: usare sempre `python -m PyInstaller` (non `pyinstaller` diretto, che potrebbe non essere nel PATH su installazioni utente).
 
 ### Build rapida (doppio click)
-Usare `_clean_and_build.bat` nella root del progetto: pulisce, builda installer, portable e setup Inno (se disponibile).
+`_clean_and_build.bat`: pulisce, builda installer (onedir), portable (onefile), setup Inno (se ISCC nel PATH).
+`_build_setup.bat`: solo generazione setup. PREREQUISITO: eseguire prima build installer (dist/R-Converter/ deve esistere).
 
 ### Versione Installer (per Inno Setup)
 ```bash
@@ -31,20 +32,19 @@ Output: `installer_output/R-Converter_Setup_v1.3.1.exe`
 
 ## Regole CRITICHE
 
-### Drag & Drop
-- Il D&D usa windnd (hook Python sulla finestra root)
-- windnd funziona con --onefile perche' e' Python puro (non DLL native)
-- MAI usare subclassing WNDPROC Win32 con ctypes: crasha Tkinter
-- windnd e' obbligatorio: incluso con collect_all('windnd') in entrambi i spec
-- Il setup e' ritardato (root.after 500ms) per dare tempo alla finestra
+### Drag & Drop (portable funzionante)
+- windnd (hook Python) - funziona con --onefile perche' Python puro (no DLL native)
+- MAI subclassing WNDPROC Win32: crasha Tkinter
+- collect_all('windnd') OBBLIGATORIO in entrambi i spec
+- Setup ritardato 500ms (root.after) - dare tempo alla finestra
+- Hidden imports: windnd, windnd.windnd, ctypes, ctypes.wintypes
 
 ### Spec Files
-- Hidden imports obbligatori: PIL, PIL.Image, PIL.ImageTk, cv2, numpy, windnd, windnd.windnd, ctypes, ctypes.wintypes
-- collect_all: windnd (obbligatorio)
+- icon.ico in root (obbligatorio)
+- Hidden imports: PIL, PIL.Image, PIL.ImageTk, cv2, numpy, windnd, windnd.windnd, ctypes, ctypes.wintypes
+- collect_all('windnd') obbligatorio
 - Exclude: matplotlib, scipy, pandas, pytest, setuptools, wheel, pip
-- Optimize: 2
-- UPX: True
-- Console: False (applicazione GUI)
+- Optimize: 2, UPX: True, Console: False
 
 ### Setup per altro PC
 Il file `installer_output/R-Converter_Setup_v1.3.1.exe` e' un installer Windows completo e autonomo:

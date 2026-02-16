@@ -10,11 +10,9 @@ alwaysApply: false
 Il file `main.py` contiene tutto il codice sorgente (~2226 righe):
 
 1. **Imports, logging, costanti** (righe 1-77)
-   - Logging in %LOCALAPPDATA%\R-Converter\r_converter.log
-   - cv2 importato con try/except (opzionale)
-   - IMAGE_FORMATS, VIDEO_FORMATS (set per lookup O(1))
-   - RESOLUTION_PRESETS (dict con 12 preset)
-   - HANDLE_SIZE, HANDLE_COLOR, ROTATION_HANDLE_DISTANCE
+   - Logging: %LOCALAPPDATA%\R-Converter\r_converter.log (mai nella cartella exe)
+   - cv2 try/except: VIDEO_SUPPORT=True/False. Se False, export video disabilitato
+   - IMAGE_FORMATS, VIDEO_FORMATS (set O(1)), RESOLUTION_PRESETS, HANDLE_*
 
 2. **ImageLayer** (classe dati, righe 80-165)
    - Usa `__slots__` per efficienza memoria
@@ -57,6 +55,7 @@ Il file `main.py` contiene tutto il codice sorgente (~2226 righe):
 - get_transformed_image(zoom=X): cache zoom per pan fluido
 - _cached_canvas_size: evita update_idletasks nel hot path
 - _canvas_persistent_ids: riuso bg/img/border invece di delete/create
+- Vedi docs/PERFORMANCE_IMPROVEMENTS.md per analisi colli di bottiglia
 
 ### Export in thread separato
 ```python

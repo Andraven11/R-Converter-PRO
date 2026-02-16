@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 # R-Converter — Versione Installer (onedir)
-# Build: pyinstaller R-Converter.spec --noconfirm --clean
+# Build: python -m PyInstaller R-Converter.spec --noconfirm --clean
 
 from PyInstaller.utils.hooks import collect_all
 
