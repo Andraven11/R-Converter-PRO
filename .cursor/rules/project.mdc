@@ -44,7 +44,7 @@ Prima di refactor complesso, elencare: (1) File da modificare (2) Funzionalita i
 
 ## Struttura
 - `main.py` - Sorgente unico (~3400+ righe): GUI + header FFmpeg + dati preset + IMAGE_PROFILES + CODEC_COMPATIBILITY + export engine + processing pipeline
-- `docs/` - PERFORMANCE_IMPROVEMENTS.md, CURSOR_GIT_SETUP.md
+- `GUIDE.md` - Guida completa (uso, build, performance, troubleshooting)
 - `*.json.code.json` - File config LED wall (holiday_inn, uniview, waveco) - DATI di riferimento, integrati in main.py
 - `File configurazioni ledwall/` - File binari originali (.rcfgx, .rcvbp) - archivio, non usati a runtime
 - `_clean_and_build.bat` - Build completa. `_build_setup.bat` - Solo setup
@@ -88,16 +88,17 @@ Prima di refactor complesso, elencare: (1) File da modificare (2) Funzionalita i
 - __slots__, cache trasformazioni+zoom, compositing a target_size preview, debounce 16/33ms
 - _cached_canvas_size, oggetti canvas riutilizzabili (persistent_ids)
 - NEAREST preview, LANCZOS export. Export in thread separato
-- Export: snapshot contesto completo (profile, variabili) una sola volta all'avvio thread; gc.collect dopo export immagine/video
-- Video export via FFmpeg subprocess (NON frame-by-frame OpenCV - 10-50x piu lento)
-- Processing immagini: Pillow + numpy per deband/levels, cv2.bilateralFilter(d=5 max)
+- Export: snapshot layer (list(self.layers)) e contesto completo all'avvio thread; gc.collect dopo export
+- Video export: FFmpeg subprocess + double-buffering (Queue pre-fetch frame, producer/consumer)
+- Processing immagini: pipeline unificata numpy/BGR (2 conversioni totali, color levels+deband combinati)
+- LANCZOS per get_transformed_image e _apply_layer_transforms_to_image quando for_export=True
 - Bitrate CBR per broadcast (no VBR - garantisce qualita costante in onda)
 - GOP=1 (intra-frame only) per DNxHR/HAP/ProRes - editing e scrub istantaneo
 - Color space: Rec.709 SDR per TUTTI i preset (standard broadcast LED wall)
 
 ### Stabilita
-- Eccezioni in TUTTI i callback (try/except con logger.error)
-- cv2.VideoCapture.release() in finally SEMPRE
+- Eccezioni in TUTTI i callback (try/except con logger.error); no except pass silenzioso (usare logger.debug)
+- cv2.VideoCapture.release() in finally SEMPRE; cleanup cap gia creati se init fallisce a metà
 - Validare percorsi file (os.path.isfile) prima di qualsiasi operazione
 - Division-by-zero: max(1, denom) su output_w/output_h, scale, total_frames
 - Export: validare cartella destinazione prima di avviare thread

@@ -66,6 +66,9 @@ Dopo ogni build, verificare:
 9. FFmpeg non trovato: messaggio chiaro, export video disabilitato
 10. Il file log viene creato in %LOCALAPPDATA%\R-Converter\ (NON nella cartella exe)
 
+### Documentazione
+- GUIDE.md: guida completa (build, D&D portable, troubleshooting)
+
 ### Versioning
 - Versione corrente: 2.0.0 PRO (installer.iss MyAppVersion, _clean_and_build.bat)
 - Aggiornare in `installer.iss` (#define MyAppVersion)

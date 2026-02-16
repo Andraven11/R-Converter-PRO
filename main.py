@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk, ImageFilter, ImageOps
 import threading
+from queue import Queue
 import math
 import re
 import zipfile
@@ -462,14 +463,16 @@ class ImageLayer:
         self._zoom_cache = None
         self._zoom_cache_key = None
 
-    def get_transformed_image(self, use_cache=True, zoom=None):
+    def get_transformed_image(self, use_cache=True, zoom=None, for_export=False):
         """Restituisce l'immagine con trasformazioni applicate (con cache).
         Se zoom è fornito, restituisce l'immagine già ridimensionata (cache separata).
+        for_export: se True usa LANCZOS per qualità migliore (rotation, resize).
         """
         if self.original_image is None:
             return None
 
         base_key = (self.rotation, self.flip_h, self.flip_v)
+        resample = Image.Resampling.LANCZOS if for_export else Image.Resampling.BILINEAR
 
         # Cache zoom: se zoom fornito e cache hit, ritorna subito
         if zoom is not None and use_cache:
@@ -489,7 +492,7 @@ class ImageLayer:
             if self.flip_v:
                 img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
             if self.rotation != 0:
-                img = img.rotate(-self.rotation, resample=Image.Resampling.BILINEAR, expand=True)
+                img = img.rotate(-self.rotation, resample=resample, expand=True)
             if use_cache:
                 self._cache = img
                 self._cache_key = base_key
@@ -499,7 +502,7 @@ class ImageLayer:
             zoom_pct = zoom / 100.0
             new_w = max(1, int(img.size[0] * zoom_pct))
             new_h = max(1, int(img.size[1] * zoom_pct))
-            img = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+            img = img.resize((new_w, new_h), resample)
             if use_cache:
                 self._zoom_cache = img
                 self._zoom_cache_key = (*base_key, zoom)
@@ -1148,10 +1151,12 @@ class RConverter:
         Usa windnd (Python puro, nessun subclassing pericoloso).
         Fallback: tkinterdnd2.
         Il setup è ritardato per assicurare che la finestra sia pronta.
+        Con PyInstaller onefile (portable) serve più tempo: estrazione in temp.
         """
         self.drag_drop_enabled = False
-        # Ritarda il setup per dare tempo alla finestra di inizializzarsi
-        self.root.after(500, self._do_setup_drag_and_drop)
+        # Ritarda il setup: 500ms da sorgente, 1200ms se frozen/onefile (portable)
+        delay = 1200 if getattr(sys, 'frozen', False) else 500
+        self.root.after(delay, self._do_setup_drag_and_drop)
 
     def _find_ffmpeg(self):
         """Cerca ffmpeg: bundled (PyInstaller), LOCALAPPDATA, PATH, cartelle note."""
@@ -1271,13 +1276,18 @@ class RConverter:
                 self.ffmpeg_status_label.config(text=f"FFmpeg {ver}")
             else:
                 self.ffmpeg_status_label.config(text="FFmpeg non trovato")
-        except Exception:
+        except Exception as ex:
+            logger.debug(f"update_ffmpeg_status_label: {ex}")
             if hasattr(self, 'ffmpeg_status_label'):
                 self.ffmpeg_status_label.config(text="FFmpeg ?")
 
     def _do_setup_drag_and_drop(self):
         """Setup effettivo del drag and drop (chiamato dopo init finestra)"""
-        # Tentativo 1: windnd (affidabile su Windows, anche con PyInstaller onefile)
+        try:
+            self.root.update_idletasks()
+            self.root.update()
+        except Exception:
+            pass
         try:
             import windnd  # type: ignore[import-not-found]
             windnd.hook_dropfiles(self.root, func=self._on_drop_windnd)
@@ -1950,7 +1960,8 @@ class RConverter:
         return (x, y, final_w, final_h)
 
     def _apply_image_processing(self, img, filters, intensity=1.0):
-        """Pipeline broadcast: color levels, deband, denoise, bilateral, sharpen, dither.
+        """Pipeline broadcast ottimizzata: color levels, deband, denoise, bilateral, sharpen.
+        Una sola conversione PIL->numpy all'inizio, una numpy->PIL alla fine.
         intensity: 0-1 scala i parametri (da proc_intensity)
         """
         if not filters or img is None:
@@ -1959,48 +1970,47 @@ class RConverter:
             arr = np.array(img)
             if arr.size == 0:
                 return img
+            if arr.shape[2] == 4:
+                bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+            else:
+                bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
             scale = max(0.01, min(1.0, float(intensity)))
-            # 1. Color levels
+            # 1+2. Color levels + deband combinati (float32, evita allocazioni intermedie)
             bl = int(filters.get("black_level", 0) * scale)
             wl = int(255 - (255 - filters.get("white_level", 255)) * scale)
             wl = max(wl, bl + 1)
             scale_val = 255.0 / (wl - bl)
-            arr = np.clip((arr.astype(np.float32) - bl) * scale_val, 0, 255).astype(np.uint8)
-            img = Image.fromarray(arr)
-            # 2. Deband (grain leggero per rompere banding - alternativa a FFmpeg deband)
+            bgr_f = (bgr.astype(np.float32) - bl) * scale_val
             grain = int(filters.get("deband_grain", 2) * scale)
             if grain > 0 and VIDEO_SUPPORT:
-                arr = np.array(img)
-                noise = np.random.randint(-grain, grain + 1, arr.shape, dtype=np.int16)
-                arr = np.clip(arr.astype(np.int16) + noise, 0, 255).astype(np.uint8)
-                img = Image.fromarray(arr)
-            # 3. Denoise leggero (median 3x3 se denoise_strength > 0)
+                noise = np.random.randint(-grain, grain + 1, bgr.shape, dtype=np.int16)
+                bgr_f = np.clip(bgr_f + noise.astype(np.float32), 0, 255)
+            bgr = np.clip(bgr_f, 0, 255).astype(np.uint8)
+            # 3. Denoise (median blur su BGR)
             dn = filters.get("denoise_strength", 0) * scale
             if dn > 0.2 and VIDEO_SUPPORT:
-                bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
                 k = 3 if dn < 0.5 else 5
-                filtered = cv2.medianBlur(bgr, k)
-                img = Image.fromarray(cv2.cvtColor(filtered, cv2.COLOR_BGR2RGB))
-            # 4. Bilateral
-            if VIDEO_SUPPORT and img.width * img.height < 4_500_000:
+                bgr = cv2.medianBlur(bgr, k)
+            # 4. Bilateral (su BGR)
+            if VIDEO_SUPPORT and bgr.shape[0] * bgr.shape[1] < 4_500_000:
                 sigma_s = max(1, int(filters.get("bilateral_sigma_s", 2) * scale))
                 sigma_r = filters.get("bilateral_sigma_r", 0.08) * scale
-                bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-                filtered = cv2.bilateralFilter(bgr, d=5, sigmaColor=int(sigma_r * 255), sigmaSpace=sigma_s)
-                img = Image.fromarray(cv2.cvtColor(filtered, cv2.COLOR_BGR2RGB))
-            # 5. Sharpen
+                bgr = cv2.bilateralFilter(bgr, d=5, sigmaColor=int(sigma_r * 255), sigmaSpace=sigma_s)
+            # 5. Sharpen: converti a PIL (unica conversione finale)
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(rgb)
             amt = filters.get("sharpen_amount", 0) * scale
             if amt > 0:
                 percent = min(int(amt * 200), 200)
                 img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=percent, threshold=2))
-            # 6. Dither (per export a bit depth inferiore - opzionale, qui skip per PNG 8bit)
-            # Il dither e' applicato da FFmpeg per video; per immagini PNG manteniamo full depth
         except Exception as e:
             logger.warning(f"Processing filtri: {e}")
         return img
 
-    def _apply_layer_transforms_to_image(self, img, layer):
-        """Applica flip e rotation di un layer a un'immagine (per override frame video nel composito)"""
+    def _apply_layer_transforms_to_image(self, img, layer, for_export=False):
+        """Applica flip e rotation di un layer a un'immagine (per override frame video nel composito).
+        for_export: se True usa LANCZOS per qualità migliore.
+        """
         if img is None:
             return None
         img = img.copy()
@@ -2010,12 +2020,13 @@ class RConverter:
             img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
         if layer.flip_v:
             img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+        resample = Image.Resampling.LANCZOS if for_export else Image.Resampling.BILINEAR
         if layer.rotation != 0:
-            img = img.rotate(-layer.rotation, resample=Image.Resampling.BILINEAR, expand=True)
+            img = img.rotate(-layer.rotation, resample=resample, expand=True)
         return img
 
     def create_composite_image(self, output_w, output_h, for_export=False, target_size=None,
-                               video_frame_overrides=None):
+                               video_frame_overrides=None, layers=None):
         """Crea l'immagine composita di tutti i layer (immagini + video)
 
         Args:
@@ -2023,10 +2034,12 @@ class RConverter:
             for_export: se True usa LANCZOS per qualità migliore
             target_size: (w, h) - se fornito, crea direttamente a questa dimensione
             video_frame_overrides: {layer: PIL.Image} - frame corrente per layer video (export video)
+            layers: se fornito usa questi layer (thread-safe export); altrimenti self.layers
         """
         output_w = max(1, output_w)
         output_h = max(1, output_h)
         video_frame_overrides = video_frame_overrides or {}
+        layers = layers if layers is not None else self.layers
 
         if target_size:
             target_w, target_h = target_size
@@ -2040,13 +2053,13 @@ class RConverter:
             out_img = Image.new('RGBA', (output_w, output_h), color=self.bg_color_var.get())
             resample = Image.Resampling.LANCZOS if for_export else Image.Resampling.BILINEAR
 
-        for layer in self.layers:
+        for layer in layers:
             try:
                 if layer in video_frame_overrides and video_frame_overrides[layer] is not None:
-                    img = self._apply_layer_transforms_to_image(video_frame_overrides[layer], layer)
+                    img = self._apply_layer_transforms_to_image(video_frame_overrides[layer], layer, for_export=for_export)
                 else:
                     img = layer.get_transformed_image(use_cache=True,
-                        zoom=layer.zoom if target_size else None)
+                        zoom=layer.zoom if target_size else None, for_export=for_export)
                 if img is None:
                     continue
 
@@ -2069,8 +2082,8 @@ class RConverter:
                 except ValueError:
                     try:
                         out_img.paste(img, (x, y))
-                    except Exception:
-                        pass
+                    except Exception as paste_ex:
+                        logger.debug(f"Paste fallback layer {layer.name}: {paste_ex}")
             except Exception as e:
                 logger.warning(f"Errore rendering layer {layer.name}: {e}")
                 continue
@@ -2890,8 +2903,8 @@ class RConverter:
             widget.config(state=state)
         except tk.TclError:
             pass  # Widget non supporta state
-        except Exception:
-            pass
+        except Exception as ex:
+            logger.debug(f"set_widget_state: {ex}")
         for child in widget.winfo_children():
             self._set_widget_state(child, state)
 
@@ -2994,7 +3007,8 @@ class RConverter:
             return
 
         self.progress.start()
-        thread = threading.Thread(target=self._do_export_video, args=(filepath, self.layers), daemon=True)
+        layers_snapshot = list(self.layers)
+        thread = threading.Thread(target=self._do_export_video, args=(filepath, layers_snapshot), daemon=True)
         thread.start()
 
     def _build_ffmpeg_video_command(self, filepath, output_w, output_h, fps, profile, ext):
@@ -3118,14 +3132,21 @@ class RConverter:
             if not video_layers:
                 raise Exception("Nessun layer video nel progetto")
 
-            for layer in video_layers:
-                vpath = getattr(layer, 'video_path', None)
-                if not vpath or not os.path.isfile(vpath):
-                    raise Exception(f"File video non valido: {vpath}")
-                cap = cv2.VideoCapture(vpath)
-                if not cap.isOpened():
-                    raise Exception(f"Impossibile aprire video: {vpath}")
-                caps[layer] = cap
+            try:
+                for layer in video_layers:
+                    vpath = getattr(layer, 'video_path', None)
+                    if not vpath or not os.path.isfile(vpath):
+                        raise Exception(f"File video non valido: {vpath}")
+                    cap = cv2.VideoCapture(vpath)
+                    if not cap.isOpened():
+                        cap.release()
+                        raise Exception(f"Impossibile aprire video: {vpath}")
+                    caps[layer] = cap
+            except Exception:
+                for cap in caps.values():
+                    cap.release()
+                caps.clear()
+                raise
 
             total_frames = max((int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) for cap in caps.values()), default=0)
             total_frames = min(max(1, total_frames), 3000)  # Limite GIF, evita div-by-zero in progress
@@ -3136,7 +3157,7 @@ class RConverter:
             def make_composite_frame(video_frame_overrides):
                 """Crea il composito di tutti i layer con override per i video"""
                 return self.create_composite_image(output_w, output_h, for_export=True,
-                                                   video_frame_overrides=video_frame_overrides)
+                                                   video_frame_overrides=video_frame_overrides, layers=all_layers)
 
             if ext == '.gif':
                 frames = []
@@ -3183,26 +3204,41 @@ class RConverter:
             # MP4/AVI/WEBM: usa FFmpeg se disponibile (10-50x più veloce), altrimenti OpenCV
             ff_cmd = self._build_ffmpeg_video_command(filepath, output_w, output_h, fps, profile, ext)
             if ff_cmd and ext != '.gif':
-                # Export via FFmpeg pipe (molto più veloce)
+                # Export via FFmpeg pipe con double-buffering (pre-fetch frame)
                 try:
                     creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if sys.platform == 'win32' else 0
                     proc = subprocess.Popen(ff_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
                                             creationflags=creationflags)
+                    frame_queue = Queue(maxsize=4)
+
+                    def frame_reader():
+                        """Producer: legge frame in anticipo e li mette in coda"""
+                        try:
+                            lf = {}
+                            for _ in range(total_frames):
+                                overrides = {}
+                                for layer, cap in caps.items():
+                                    ret, frame = cap.read()
+                                    if ret:
+                                        pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                                        overrides[layer] = pil_frame
+                                        lf[layer] = pil_frame
+                                    elif layer in lf:
+                                        overrides[layer] = lf[layer]
+                                frame_queue.put(overrides)
+                            frame_queue.put(None)
+                        except Exception as e:
+                            logger.warning(f"Frame reader: {e}")
+                            frame_queue.put(None)
+
+                    threading.Thread(target=frame_reader, daemon=True).start()
                     frame_count = 0
-                    frame_bytes = output_w * output_h * 3
-                    while frame_count < total_frames:
-                        video_frame_overrides = {}
-                        for layer, cap in caps.items():
-                            ret, frame = cap.read()
-                            if ret:
-                                pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                                video_frame_overrides[layer] = pil_frame
-                                last_frame[layer] = pil_frame
-                            elif layer in last_frame:
-                                video_frame_overrides[layer] = last_frame[layer]
-                        composite = make_composite_frame(video_frame_overrides)
-                        rgb = np.array(composite)
-                        proc.stdin.write(rgb.tobytes())
+                    while True:
+                        overrides = frame_queue.get()
+                        if overrides is None:
+                            break
+                        composite = make_composite_frame(overrides)
+                        proc.stdin.write(composite.tobytes())
                         del composite
                         frame_count += 1
                         if frame_count % 30 == 0:
@@ -3331,7 +3367,12 @@ class RConverter:
 
 def main():
     root = tk.Tk()
-    _app = RConverter(root)  # noqa: F841
+    app = RConverter(root)
+    argv_files = []
+    if len(sys.argv) > 1 and getattr(sys, 'frozen', False):
+        argv_files = [f for f in sys.argv[1:] if os.path.isfile(f)]
+    if argv_files:
+        root.after(1500, lambda: app._process_dropped_files(argv_files))
 
     root.update_idletasks()
     x = (root.winfo_screenwidth() - root.winfo_width()) // 2
