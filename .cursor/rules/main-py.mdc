@@ -76,20 +76,21 @@ Ogni cambio di LED Wall, Software o Hz deve chiamare `update_export_summary()` c
 ```
 Per ogni layer:
   1. Resize alla risoluzione output (Lanczos up, Lanczos down)
-  2. Deband (se checkbox attivo): numpy gradient threshold
-  3. Color Levels: numpy clip + remap
+  2. Deband (se checkbox attivo): numpy gradient threshold + grain
+  3. Color Levels: numpy clip + remap (black_level, white_level)
   4. Bilateral Filter (se checkbox attivo): cv2.bilateralFilter(d=5)
   5. Sharpen: PIL UnsharpMask adattivo
-  6. Dither: per conversioni bit depth
+  6. Dither Bayer: ordered 8x8 pattern (anti-banding LED wall 13-14 bit)
 
 Compositing:
   7. Paste tutti i layer processati su canvas output
   8. Conversione colore finale (Rec.709 SDR)
+  9. _apply_image_processing() sul composito (immagine E video)
 
 Encoding (solo video):
-  9. FFmpeg con filter chain ottimizzata
-  10. Codec/container dal software target
-  11. Audio dal quality tier
+  10. FFmpeg con color metadata bt709, HAP snappy+chunks, H.264/H.265 CBR
+  11. Codec/container dal software target
+  12. Audio dal quality tier
 ```
 
 ### Export in thread separato

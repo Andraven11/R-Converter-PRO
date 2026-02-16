@@ -73,6 +73,8 @@ Prima di refactor complesso, elencare: (1) File da modificare (2) Funzionalita i
 - **Auto-Hz da preset built-in**: cambio LED Wall imposta Hz da input_signal_hz del preset
 - **Export immagini broadcast-grade**: IMAGE_PROFILES per tier (entry/professional/broadcast) con formato, bit_depth, dpi, compressione; export immagine usa profilo automatico
 - **CODEC_COMPATIBILITY**: dict keyed by software (resolume, vmix, millumin, generic_h264, generic_h265); note mostrate in sw_info_label al cambio Software Target
+- **Color metadata bt709**: tutti i codec taggati con -color_primaries bt709 -color_trc bt709 -colorspace bt709 (-color_range tv per YUV)
+- **HAP**: -compressor snappy -chunks 8 per Resolume GPU e file piu piccoli
 
 ## 6 Preset LED Wall Built-in
 1. NovaStar A5 Plus (Entry - 13bit, 1/16, 1920Hz)
@@ -115,6 +117,7 @@ Prima di refactor complesso, elencare: (1) File da modificare (2) Funzionalita i
 - FFmpeg non trovato: pulsante "Verifica FFmpeg" scarica da gyan.dev; export immagine sempre attivo
 
 ### GUI/UX
+- **Canvas area LED wall**: sempre visibile al centro, rettangolo con risoluzione output; retry init se dimensioni zero (Tk layout)
 - Tema blu notte (#0a1929), Segoe UI, emoji per sezioni
 - Header bar: titolo R-Converter PRO + stato FFmpeg + pulsante Verifica FFmpeg
 - Pannello destro: scrollabile, 6 sezioni visibili (Output+Hz, Sfondo, LED Wall, Software, Riepilogo, Export) - Processing Pre-Export nascosto, sempre al massimo
@@ -148,7 +151,9 @@ Prima di refactor complesso, elencare: (1) File da modificare (2) Funzionalita i
 
 ### Export Broadcast-Grade
 - Tutti i layer processati PRIMA del compositing (uniformare risoluzione, rimuovere artefatti)
-- Pipeline processing: upscale/downscale Lanczos -> deband -> denoise -> color levels -> bilateral -> sharpen -> dither
+- Pipeline processing: upscale/downscale Lanczos -> deband -> denoise -> color levels -> bilateral -> sharpen -> dither Bayer
+- Processing applicato ANCHE ai frame video (make_composite_frame chiama _apply_image_processing)
+- Dither Bayer: anti-banding per LED wall 13-14 bit gray depth (dither_type, dither_scale da FILTER_PROFILES)
 - Ordine filtri FFmpeg: scale -> deband -> hqdn3d -> colorlevels -> bilateral -> unsharp -> format+dither
 - Audio: PCM 16-bit/48kHz (professional), PCM 24-bit/48kHz (broadcast), AAC 320kbps (generico)
 - Container: MOV per DNxHR/HAP/ProRes, MP4 per H.264/H.265

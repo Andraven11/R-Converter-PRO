@@ -12,7 +12,7 @@ _ffmpeg_dir = Path("ffmpeg")
 if (_ffmpeg_dir / "bin" / "ffmpeg.exe").exists():
     datas.append((str(_ffmpeg_dir), "ffmpeg"))
 hiddenimports = [
-    'PIL', 'PIL.Image', 'PIL.ImageTk',
+    'PIL', 'PIL.Image', 'PIL.ImageTk', 'PIL.ImageFilter',
     'cv2', 'numpy',
     'windnd', 'windnd.windnd',
     'ctypes', 'ctypes.wintypes',

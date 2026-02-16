@@ -606,8 +606,8 @@ class RConverter:
         self._find_ffmpeg()
         self._load_presets_from_appdata()
 
-        # Inizializza canvas con preview vuoto (risoluzione default)
-        self.root.after(100, self.init_canvas_preview)
+        # Inizializza canvas con preview area LED wall (retry se dimensioni non ancora pronte)
+        self.root.after(100, self._init_canvas_preview_with_retry)
 
     def setup_style(self):
         style = ttk.Style()
@@ -969,7 +969,7 @@ class RConverter:
             font=('Segoe UI', 9), foreground=self.border_color)
         self.instruction_label.pack(pady=(0, 5))
 
-        # Canvas con bordo moderno
+        # Canvas con bordo moderno (area LED wall sempre visibile, expand=True)
         canvas_container = tk.Frame(canvas_frame, bg=self.border_color, bd=0)
         canvas_container.pack(fill=tk.BOTH, expand=True)
 
@@ -1357,8 +1357,19 @@ class RConverter:
         except Exception as e:
             logger.error(f"Errore on_drop_tkdnd: {e}")
 
+    def _init_canvas_preview_with_retry(self, attempt=0):
+        """Wrapper con retry: canvas puo avere dimensioni zero al primo frame (Tk layout)"""
+        self.canvas.update_idletasks()
+        canvas_w = self.canvas.winfo_width()
+        canvas_h = self.canvas.winfo_height()
+        if canvas_w < 10 or canvas_h < 10:
+            if attempt < 3:
+                self.root.after(150, lambda: self._init_canvas_preview_with_retry(attempt + 1))
+            return
+        self.init_canvas_preview()
+
     def init_canvas_preview(self):
-        """Inizializza il canvas con la preview della risoluzione di default"""
+        """Inizializza il canvas con la preview dell'area LED wall (risoluzione output)"""
         self.canvas.update_idletasks()
         canvas_w = self.canvas.winfo_width()
         canvas_h = self.canvas.winfo_height()
@@ -2003,6 +2014,27 @@ class RConverter:
             if amt > 0:
                 percent = min(int(amt * 200), 200)
                 img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=percent, threshold=2))
+            # 6. Dither Bayer (anti-banding per LED wall 13-14 bit gray depth)
+            dither_type = filters.get("dither_type", "")
+            dither_scale = int(filters.get("dither_scale", 2) * scale)
+            if dither_type == "bayer" and dither_scale > 0 and VIDEO_SUPPORT:
+                arr = np.array(img).astype(np.float32)
+                bayer_8x8 = np.array([
+                    [0, 32, 8, 40, 2, 34, 10, 42],
+                    [48, 16, 56, 24, 50, 18, 58, 26],
+                    [12, 44, 4, 36, 14, 46, 6, 38],
+                    [60, 28, 52, 20, 62, 30, 54, 22],
+                    [3, 35, 11, 43, 1, 33, 9, 41],
+                    [51, 19, 59, 27, 49, 17, 57, 25],
+                    [15, 47, 7, 39, 13, 45, 5, 37],
+                    [63, 31, 55, 23, 61, 29, 53, 21],
+                ], dtype=np.float32) / 64.0 - 0.5
+                h, w = arr.shape[:2]
+                tiled = np.tile(bayer_8x8, (h // 8 + 1, w // 8 + 1))[:h, :w]
+                tiled = tiled[:, :, np.newaxis]
+                strength = dither_scale * 1.5
+                arr = np.clip(arr + tiled * strength, 0, 255).astype(np.uint8)
+                img = Image.fromarray(arr)
         except Exception as e:
             logger.warning(f"Processing filtri: {e}")
         return img
@@ -3026,7 +3058,9 @@ class RConverter:
         container = v.get("container", "mp4")
         if codec == "hap" or v.get("format_name") in ("hap", "hap_q"):
             fmt_hap = v.get("format_name", "hap")
-            cmd.extend(["-c:v", "hap", "-format", fmt_hap, "-an"])
+            chunks = v.get("hap_chunks", 8)
+            cmd.extend(["-c:v", "hap", "-format", fmt_hap,
+                        "-compressor", "snappy", "-chunks", str(chunks), "-an"])
         elif codec == "dnxhd":
             cmd.extend(["-c:v", "dnxhd", "-profile:v", v.get("profile", "dnxhr_hq")])
             if software != "vmix":
@@ -3041,16 +3075,27 @@ class RConverter:
             cmd.extend(["-c:a", "pcm_s24le", "-ar", "48000", "-ac", "2"])
         elif codec == "libx265":
             denom = max(1920 * 1080, 1)
-            br = int(v.get("bitrate_1080p_mbps", 140) * (output_w * output_h) / denom)
+            br_mbps = v.get("bitrate_1080p_mbps", 140) * (output_w * output_h) / denom
+            br_kbps = max(1000, int(br_mbps * 1000))
             cmd.extend(["-c:v", "libx265", "-preset", v.get("preset", "medium"),
-                        "-x265-params", f"vbv-maxrate={br}:vbv-bufsize={br}"])
+                        "-b:v", f"{br_kbps}k", "-maxrate", f"{br_kbps}k",
+                        "-bufsize", f"{br_kbps * 2}k",
+                        "-x265-params", f"vbv-maxrate={br_kbps}:vbv-bufsize={br_kbps * 2}:strict-cbr=1"])
             cmd.extend(["-c:a", "aac", "-b:a", "320k", "-ar", "48000"])
         else:
             denom = max(1920 * 1080, 1)
-            br = int(v.get("bitrate_1080p_mbps", 200) * (output_w * output_h) / denom) * 1000
+            br_mbps = v.get("bitrate_1080p_mbps", 200) * (output_w * output_h) / denom
+            br_kbps = max(1000, int(br_mbps * 1000))
             cmd.extend(["-c:v", "libx264", "-preset", v.get("preset", "fast"),
-                        "-profile:v", "high", "-b:v", f"{br}", "-maxrate", f"{br}", "-bufsize", f"{br*2}"])
+                        "-profile:v", "high", "-b:v", f"{br_kbps}k",
+                        "-maxrate", f"{br_kbps}k", "-bufsize", f"{br_kbps * 2}k"])
             cmd.extend(["-c:a", "aac", "-b:a", "320k", "-ar", "48000"])
+        # Color metadata bt709 (broadcast LED wall - Resolume/vMix/NovaStar)
+        if codec == "hap" or v.get("format_name") in ("hap", "hap_q"):
+            cmd.extend(["-color_primaries", "bt709", "-color_trc", "iec61966-2-1", "-colorspace", "rgb"])
+        else:
+            cmd.extend(["-color_primaries", "bt709", "-color_trc", "bt709",
+                        "-colorspace", "bt709", "-color_range", "tv"])
         if ext == ".mov" or container == "mov":
             cmd.extend(["-f", "mov"])
         cmd.append(filepath)
@@ -3126,7 +3171,9 @@ class RConverter:
             led_key = self.led_wall_var.get()
             sw_key = self.software_target_var.get()
             hz_val = self.output_hz.get()
+            proc_int = self.proc_intensity.get() / 100.0
             profile = get_export_profile(led_key, sw_key, hz_val, custom_presets=self.custom_presets)
+            filters = profile.get("filters", {})
 
             video_layers = [l for l in all_layers if getattr(l, 'is_video', False) and l.is_video]
             if not video_layers:
@@ -3155,9 +3202,12 @@ class RConverter:
             logger.info(f"Export composito: {output_w}x{output_h} @ {fps}fps, {len(all_layers)} layer -> {filepath}")
 
             def make_composite_frame(video_frame_overrides):
-                """Crea il composito di tutti i layer con override per i video"""
-                return self.create_composite_image(output_w, output_h, for_export=True,
-                                                   video_frame_overrides=video_frame_overrides, layers=all_layers)
+                """Crea il composito di tutti i layer con override per i video + processing broadcast"""
+                composite = self.create_composite_image(output_w, output_h, for_export=True,
+                                                        video_frame_overrides=video_frame_overrides,
+                                                        layers=all_layers)
+                composite = self._apply_image_processing(composite, filters, intensity=proc_int)
+                return composite
 
             if ext == '.gif':
                 frames = []

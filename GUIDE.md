@@ -33,8 +33,10 @@
 ### Export Broadcast
 - **6 preset LED Wall** - NovaStar A5/A8/A10, Holiday Inn, Uniview, Wave&Co
 - **5 software target** - Resolume (HAP Q), vMix (DNxHR), Millumin, H.264, H.265
-- **Pipeline ottimizzata** - Color levels, deband, denoise, bilateral, sharpen
+- **Pipeline ottimizzata** - Color levels, deband, denoise, bilateral, sharpen, dither Bayer
 - **Export immagine/video** - PNG/JPG, MP4/MOV/GIF con codec broadcast
+- **Color metadata bt709** - Tag corretti per Resolume/vMix/NovaStar
+- **HAP Snappy + Chunks** - Ottimizzato per Resolume GPU
 
 ### UI/UX
 - Tema dark blu notte, pannello destro PRO con dropdown a cascata
@@ -129,9 +131,10 @@ python -m PyInstaller R-Converter_Portable.spec --noconfirm --clean
 
 ### Test Post-Build
 1. Avvio senza errori
-2. Drag & drop funziona (anche portable)
-3. Export immagine e video
-4. Log in %LOCALAPPDATA%\R-Converter\
+2. **Canvas area LED wall visibile** (rettangolo con risoluzione output al centro)
+3. **Drag & drop funziona** (anche portable - windnd con ritardo 500ms)
+4. Export immagine e video
+5. Log in %LOCALAPPDATA%\R-Converter\
 
 ---
 
@@ -171,9 +174,14 @@ R-Converter/
 
 ## 6. Performance e Ottimizzazioni
 
-### Export Implementate (v2.0)
+### Export Implementate (v2.0+)
 - **Pipeline unificata** - 2 conversioni PIL↔numpy invece di 6 (~30-40% più veloce)
 - **Double-buffering video** - Pre-fetch frame, Queue producer/consumer (~20-30% più veloce)
+- **Processing su video** - Stessi filtri dell'export immagine applicati a ogni frame (color levels, deband, denoise, bilateral, sharpen, dither Bayer)
+- **Dither Bayer** - Anti-banding per LED wall 13-14 bit gray depth
+- **Color metadata bt709** - Tag corretti per interpretazione colore su Resolume/vMix/NovaStar
+- **HAP Snappy + Chunks** - File più piccoli, decodifica parallela Resolume
+- **CBR H.264/H.265** - Bitrate costante per broadcast
 - **LANCZOS export** - Qualità superiore per rotation/resize
 - **Thread-safety** - Snapshot layer, cleanup VideoCapture
 
@@ -239,6 +247,7 @@ git add -A && git commit -m "chore: descrizione" && git push
 - logger invece di print()
 
 ### Changelog
+- **v2.0.1** - Fix broadcast: processing su video, dither Bayer, color metadata bt709, HAP snappy+chunks, H.264/H.265 CBR
 - **v2.0.0** - Pannello PRO, export broadcast, pipeline ottimizzata
 - **v1.3.1** - Fix D&D portable, log in AppData
 - **v1.3.0** - Logging, gestione errori

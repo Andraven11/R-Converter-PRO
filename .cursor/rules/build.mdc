@@ -56,7 +56,8 @@ Output: `installer_output/R-Converter_PRO_Setup_v2.0.0.exe`
 ### Test Post-Build PRO
 Dopo ogni build, verificare:
 1. L'applicazione si avvia senza errori
-2. Il drag & drop di immagini e video funziona
+2. **Canvas area LED wall visibile** (rettangolo centrale con risoluzione output)
+3. Il drag & drop di immagini e video funziona (portable: attendere ~1.2s dopo avvio)
 3. Pannello destro: tutti i dropdown funzionano e aggiornano il riepilogo
 4. Preset LED wall: i 6 built-in sono tutti selezionabili
 5. Import preset JSON: funziona e popola il dropdown
