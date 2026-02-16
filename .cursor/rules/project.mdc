@@ -35,12 +35,19 @@ Prima di refactor complesso, elencare: (1) File da modificare (2) Funzionalita i
 
 ## Stack Tecnologico
 - Python 3.8+ (testato con 3.13)
-- Pillow >=10.0.0 (processing immagini, compositing)
-- opencv-python >=4.8.0 (bilateral filter, video input, processing avanzato)
-- numpy >=1.24.0 (array manipulation per deband/color levels)
-- windnd >=1.0.7 (necessario per drag & drop)
-- PyInstaller >=5.0 (build)
+- Pillow >=10.0.0,<12 (Python 3.8-3.9) oppure Pillow >=10.0.0 (Python 3.10+; 12.x richiede 3.10+)
+- opencv-python >=4.8.0 (bilateral filter, video input; ultimo 4.13.x Feb 2026)
+- numpy >=1.24.0,<2 (Python 3.8-3.10) oppure numpy >=2.0 (Python 3.11+; NumPy 2 ha breaking changes)
+- windnd >=1.0.7 (necessario per drag & drop; ultimo 1.0.7, nessun aggiornamento dal 2020)
+- PyInstaller >=5.0 (build; ultimo 6.19.x Feb 2026)
 - FFmpeg (esterno, non pip): encoding broadcast-grade (DNxHR, HAP, ProRes, H.264/H.265)
+
+## Audit Dipendenze (Feb 2026)
+- **Codec FFmpeg**: dnxhd, hap, prores_ks, libx264, libx265 tutti presenti in essentials build gyan.dev
+- **FFmpeg essentials**: ffmpeg-release-essentials.zip (v8.0.1 Nov 2025), ~31 MB, include libx264/libx265
+- **Pillow 12**: richiede Python 3.10+; per 3.8 mantenere Pillow 11.x
+- **NumPy 2**: richiede Python 3.11+; per 3.8-3.10 usare numpy 1.26.x
+- **windnd**: nessun fork/alternativa attiva; mantenere 1.0.7
 
 ## Struttura
 - `main.py` - Sorgente unico (~3400+ righe): GUI + header FFmpeg + dati preset + IMAGE_PROFILES + CODEC_COMPATIBILITY + export engine + processing pipeline

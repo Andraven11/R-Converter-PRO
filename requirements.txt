@@ -1,14 +1,15 @@
-# R-Converter - Dipendenze
+# R-Converter PRO - Dipendenze
 # Installa con: pip install -r requirements.txt
+# Audit: Feb 2026 - versioni verificate su PyPI
 
-# Elaborazione immagini
+# Elaborazione immagini (Pillow 12 richiede Python 3.10+)
 Pillow>=10.0.0
 
-# Elaborazione video (opzionale ma consigliato)
+# Elaborazione video (opzionale ma consigliato; ultimo 4.13.x)
 opencv-python>=4.8.0
 
-# Supporto array per video processing
+# Supporto array per video processing (NumPy 2 richiede Python 3.11+)
 numpy>=1.24.0
 
-# Drag & drop nativo Windows
+# Drag & drop nativo Windows (ultimo 1.0.7, nessun aggiornamento dal 2020)
 windnd>=1.0.7
