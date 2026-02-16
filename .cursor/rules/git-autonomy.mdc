@@ -10,12 +10,14 @@ alwaysApply: true
 
 Quando l'utente chiede di fare **commit and push** (o "committare", "pushare", "salvare su git"):
 
+**Eseguire subito** (non chiedere conferma):
+
 ```bash
 git add -A && git commit -m "chore: descrizione modifiche" && git push
 ```
 
-- **Permessi**: `required_permissions: ["all", "network"]`
-- **Messaggio**: adattare a feat/fix/docs/chore in base alle modifiche
+- **Permessi**: `required_permissions: ["git_write", "network"]`
+- **Messaggio**: adattare a feat/fix/docs/chore in base alle modifiche (es. `chore: rules git autonomia` per aggiornamenti rules)
 
 ## Quando eseguire
 
