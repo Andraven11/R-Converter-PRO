@@ -52,7 +52,10 @@ build/
 dist/
 installer_output/
 
-# Script di build temporanei
+# Script di build temporanei (eccetto quelli utili)
 _*.bat
 _*.py
 _*.txt
+git_result.txt
+!_build_setup.bat
+!_clean_and_build.bat

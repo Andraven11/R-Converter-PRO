@@ -81,7 +81,8 @@ class ImageLayer:
     """Rappresenta un'immagine nel collage con le sue proprietà"""
     __slots__ = ['id', 'original_image', 'name', 'offset_x', 'offset_y', 'zoom',
                  'rotation', 'flip_h', 'flip_v', 'is_video', 'video_path',
-                 'video_fps', 'video_frames', 'bounds_in_canvas', '_cache', '_cache_key']
+                 'video_fps', 'video_frames', 'bounds_in_canvas', '_cache', '_cache_key',
+                 '_zoom_cache', '_zoom_cache_key']
 
     def __init__(self, image, name="Immagine"):
         self.id = str(uuid.uuid4())[:8]
@@ -105,36 +106,55 @@ class ImageLayer:
         # Bounds calcolati nel canvas
         self.bounds_in_canvas = None  # (x, y, w, h)
 
-        # Cache per immagine trasformata
+        # Cache per immagine trasformata (rotation, flip)
         self._cache = None
         self._cache_key = None
 
-    def get_transformed_image(self, use_cache=True):
-        """Restituisce l'immagine con trasformazioni applicate (con cache)"""
+        # Cache per immagine già zoomata (evita resize ripetuti durante pan)
+        self._zoom_cache = None
+        self._zoom_cache_key = None
+
+    def get_transformed_image(self, use_cache=True, zoom=None):
+        """Restituisce l'immagine con trasformazioni applicate (con cache).
+        Se zoom è fornito, restituisce l'immagine già ridimensionata (cache separata).
+        """
         if self.original_image is None:
             return None
 
-        cache_key = (self.rotation, self.flip_h, self.flip_v)
+        base_key = (self.rotation, self.flip_h, self.flip_v)
 
-        if use_cache and self._cache is not None and self._cache_key == cache_key:
-            return self._cache
+        # Cache zoom: se zoom fornito e cache hit, ritorna subito
+        if zoom is not None and use_cache:
+            zoom_key = (*base_key, zoom)
+            if self._zoom_cache is not None and self._zoom_cache_key == zoom_key:
+                return self._zoom_cache
 
-        img = self.original_image.copy()
-        if img.mode != 'RGBA':
-            img = img.convert('RGBA')
+        # Base: trasformazioni (rotation, flip)
+        if use_cache and self._cache is not None and self._cache_key == base_key:
+            img = self._cache
+        else:
+            img = self.original_image.copy()
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
+            if self.flip_h:
+                img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+            if self.flip_v:
+                img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+            if self.rotation != 0:
+                img = img.rotate(-self.rotation, resample=Image.Resampling.BILINEAR, expand=True)
+            if use_cache:
+                self._cache = img
+                self._cache_key = base_key
 
-        # Applica flip
-        if self.flip_h:
-            img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-        if self.flip_v:
-            img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
-
-        if self.rotation != 0:
-            img = img.rotate(-self.rotation, resample=Image.Resampling.BILINEAR, expand=True)
-
-        if use_cache:
-            self._cache = img
-            self._cache_key = cache_key
+        # Applica zoom se richiesto
+        if zoom is not None:
+            zoom_pct = zoom / 100.0
+            new_w = max(1, int(img.size[0] * zoom_pct))
+            new_h = max(1, int(img.size[1] * zoom_pct))
+            img = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+            if use_cache:
+                self._zoom_cache = img
+                self._zoom_cache_key = (*base_key, zoom)
 
         return img
 
@@ -142,6 +162,8 @@ class ImageLayer:
         """Invalida la cache dell'immagine trasformata"""
         self._cache = None
         self._cache_key = None
+        self._zoom_cache = None
+        self._zoom_cache_key = None
 
     def cleanup(self):
         """Libera risorse associate al layer"""
@@ -199,6 +221,12 @@ class RConverter:
         self._redraw_scheduled = False
         self._redraw_job = None
         self._resize_job = None
+
+        # Cache dimensioni canvas (evita update_idletasks nel hot path)
+        self._cached_canvas_size = (0, 0)
+
+        # Oggetti canvas riutilizzabili (evita delete/create ogni frame)
+        self._canvas_persistent_ids = None
 
         # Flag per evitare re-bind ricorsivo scroll
         self._scroll_bound = False
@@ -1462,61 +1490,75 @@ class RConverter:
 
         return (x, y, final_w, final_h)
 
-    def create_composite_image(self, output_w, output_h, for_export=False):
+    def create_composite_image(self, output_w, output_h, for_export=False, target_size=None):
         """Crea l'immagine composita di tutti i layer
 
         Args:
-            output_w, output_h: dimensioni output
+            output_w, output_h: dimensioni output (logiche)
             for_export: se True usa LANCZOS per qualità migliore
+            target_size: (w, h) - se fornito, crea direttamente a questa dimensione
+                        (evita resize successivo, molto più veloce per la preview)
         """
         # Protezione dimensioni minime
         output_w = max(1, output_w)
         output_h = max(1, output_h)
 
-        # Sfondo
-        bg_color = self.bg_color_var.get()
-        output = Image.new('RGBA', (output_w, output_h), color=bg_color)
-
-        # Scegli algoritmo resize
-        resample = Image.Resampling.LANCZOS if for_export else Image.Resampling.BILINEAR
+        # Per la preview: crea direttamente a target_size evitando resize enorme
+        if target_size:
+            target_w, target_h = target_size
+            target_w = max(1, target_w)
+            target_h = max(1, target_h)
+            scale = min(target_w / output_w, target_h / output_h)
+            out_img = Image.new('RGBA', (target_w, target_h), color=self.bg_color_var.get())
+            resample = Image.Resampling.NEAREST  # Veloce per preview
+        else:
+            scale = 1.0
+            out_img = Image.new('RGBA', (output_w, output_h), color=self.bg_color_var.get())
+            resample = Image.Resampling.LANCZOS if for_export else Image.Resampling.BILINEAR
 
         # Disegna ogni layer dal basso verso l'alto
         for layer in self.layers:
             try:
-                img = layer.get_transformed_image()
-                if img is None:
-                    continue
+                if target_size:
+                    # Preview: usa cache zoom (evita resize ripetuti durante pan)
+                    img = layer.get_transformed_image(use_cache=True, zoom=layer.zoom)
+                    if img is None:
+                        continue
+                    new_w = max(1, int(img.size[0] * scale))
+                    new_h = max(1, int(img.size[1] * scale))
+                    img = img.resize((new_w, new_h), resample)
+                    x = (target_w - new_w) // 2 + int(layer.offset_x * scale)
+                    y = (target_h - new_h) // 2 + int(layer.offset_y * scale)
+                else:
+                    # Export: base + resize con LANCZOS per qualità massima
+                    img = layer.get_transformed_image(use_cache=True, zoom=None)
+                    if img is None:
+                        continue
+                    zoom_pct = layer.zoom / 100.0
+                    new_w = max(1, int(img.size[0] * zoom_pct))
+                    new_h = max(1, int(img.size[1] * zoom_pct))
+                    img = img.resize((new_w, new_h), resample)
+                    x = (output_w - new_w) // 2 + layer.offset_x
+                    y = (output_h - new_h) // 2 + layer.offset_y
 
-                # Applica zoom
-                zoom = layer.zoom / 100.0
-                new_w = max(1, int(img.size[0] * zoom))
-                new_h = max(1, int(img.size[1] * zoom))
-                img = img.resize((new_w, new_h), resample)
-
-                # Posizione
-                x = (output_w - new_w) // 2 + layer.offset_x
-                y = (output_h - new_h) // 2 + layer.offset_y
-
-                # Incolla con trasparenza (gestisce coordinate fuori range)
                 try:
-                    output.paste(img, (x, y), img)
+                    out_img.paste(img, (x, y), img)
                 except ValueError:
-                    # Fallback: crop l'immagine all'area visibile
                     try:
-                        output.paste(img, (x, y))
+                        out_img.paste(img, (x, y))
                     except Exception:
-                        pass  # Layer completamente fuori dal canvas
+                        pass
             except Exception as e:
                 logger.warning(f"Errore rendering layer {layer.name}: {e}")
                 continue
 
-        return output.convert('RGB')
+        return out_img.convert('RGB')
 
-    def _schedule_redraw(self):
-        """Schedula un redraw con debounce"""
+    def _schedule_redraw(self, delay_ms=16):
+        """Schedula un redraw con debounce (evita accumulo eventi durante drag)"""
         if self._redraw_job is not None:
             self.root.after_cancel(self._redraw_job)
-        self._redraw_job = self.root.after(16, self._do_redraw)  # ~60fps max
+        self._redraw_job = self.root.after(delay_ms, self._do_redraw)
 
     def _do_redraw(self):
         """Esegue il redraw effettivo"""
@@ -1524,21 +1566,28 @@ class RConverter:
         self._redraw_canvas_internal()
 
     def redraw_canvas(self, immediate=False):
-        """Ridisegna il canvas (con debounce se non immediate)"""
-        if immediate or self.is_dragging:
+        """Ridisegna il canvas (con debounce per evitare lag durante interazioni)"""
+        if immediate:
             self._redraw_canvas_internal()
         else:
-            self._schedule_redraw()
+            # Durante drag: 33ms (~30fps) per ridurre carico; altrimenti 16ms (~60fps)
+            delay = 33 if self.is_dragging else 16
+            self._schedule_redraw(delay)
 
     def _redraw_canvas_internal(self):
         """Implementazione interna del redraw"""
         if not self.layers:
+            self._canvas_persistent_ids = None
             self.draw_empty_canvas()
             return
 
-        self.canvas.update_idletasks()
-        canvas_w = self.canvas.winfo_width()
-        canvas_h = self.canvas.winfo_height()
+        # Usa cache dimensioni (aggiornata su Configure); fallback se non valida
+        canvas_w, canvas_h = self._cached_canvas_size
+        if canvas_w < 10 or canvas_h < 10:
+            self.canvas.update_idletasks()
+            canvas_w = self.canvas.winfo_width()
+            canvas_h = self.canvas.winfo_height()
+            self._cached_canvas_size = (canvas_w, canvas_h)
 
         if canvas_w < 10 or canvas_h < 10:
             return
@@ -1551,86 +1600,82 @@ class RConverter:
         preview_w = int(output_w * self.preview_scale)
         preview_h = int(output_h * self.preview_scale)
 
-        # Crea immagine composita direttamente a risoluzione preview (molto più veloce)
-        composite = self.create_composite_image(output_w, output_h, for_export=False)
+        # Crea composita direttamente a risoluzione preview (evita resize da 4K->preview)
+        composite = self.create_composite_image(
+            output_w, output_h, for_export=False, target_size=(preview_w, preview_h)
+        )
+        self.display_image = ImageTk.PhotoImage(composite)
 
-        # Ridimensiona per preview - usa NEAREST per velocità durante il drag, BOX per qualità
-        resample = Image.Resampling.NEAREST if self.is_dragging else Image.Resampling.BOX
-        preview = composite.resize((preview_w, preview_h), resample)
-        self.display_image = ImageTk.PhotoImage(preview)
-
-        # Pulisci e disegna
-        self.canvas.delete("all")
-        self.canvas.create_rectangle(0, 0, canvas_w, canvas_h, fill="#0a1929", outline="")
-
-        # Posizione canvas output
         canvas_x = (canvas_w - preview_w) // 2
         canvas_y = (canvas_h - preview_h) // 2
         self.canvas_bounds = (canvas_x, canvas_y, preview_w, preview_h)
 
-        # Bordo output
-        self.canvas.create_rectangle(canvas_x-1, canvas_y-1, canvas_x+preview_w+1, canvas_y+preview_h+1,
-                                     outline="#666666", width=1)
-
-        # Immagine
-        self.canvas.create_image(canvas_x, canvas_y, anchor=tk.NW, image=self.display_image)
+        # Riusa oggetti canvas invece di delete/create ogni frame
+        if self._canvas_persistent_ids is None:
+            self.canvas.delete("all")
+            bg_id = self.canvas.create_rectangle(0, 0, canvas_w, canvas_h, fill="#0a1929", outline="", tags="persistent")
+            img_id = self.canvas.create_image(canvas_x, canvas_y, anchor=tk.NW, image=self.display_image, tags="persistent")
+            border_id = self.canvas.create_rectangle(canvas_x-1, canvas_y-1, canvas_x+preview_w+1, canvas_y+preview_h+1,
+                                                    outline="#666666", width=1, tags="persistent")
+            self._canvas_persistent_ids = {"bg": bg_id, "img": img_id, "border": border_id}
+        else:
+            self.canvas.delete("handles")
+            self.canvas.coords(self._canvas_persistent_ids["bg"], 0, 0, canvas_w, canvas_h)
+            self.canvas.coords(self._canvas_persistent_ids["img"], canvas_x, canvas_y)
+            self.canvas.itemconfig(self._canvas_persistent_ids["img"], image=self.display_image)
+            self.canvas.coords(self._canvas_persistent_ids["border"],
+                              canvas_x-1, canvas_y-1, canvas_x+preview_w+1, canvas_y+preview_h+1)
 
         # Calcola e salva bounds di ogni layer nel canvas
         for layer in self.layers:
             bounds = self.get_layer_bounds(layer, output_w, output_h)
-            # Converti in coordinate canvas
             lx = canvas_x + int(bounds[0] * self.preview_scale)
             ly = canvas_y + int(bounds[1] * self.preview_scale)
             lw = int(bounds[2] * self.preview_scale)
             lh = int(bounds[3] * self.preview_scale)
             layer.bounds_in_canvas = (lx, ly, lw, lh)
 
-        # Disegna selezione del layer selezionato
+        # Disegna handle (sempre create fresh, posizioni variabili)
         if self.selected_layer and self.selected_layer.bounds_in_canvas:
             self.draw_selection_handles(self.selected_layer)
 
-        # Info
         self.info_label.config(text=f"Output: {output_w}x{output_h} | Layers: {len(self.layers)}")
 
     def draw_selection_handles(self, layer):
-        """Disegna gli handle di selezione per un layer"""
+        """Disegna gli handle di selezione per un layer (tag handles per riuso canvas)"""
         if layer.bounds_in_canvas is None:
             return
 
         x, y, w, h = layer.bounds_in_canvas
 
-        # Rettangolo selezione
-        self.canvas.create_rectangle(x, y, x+w, y+h,
-                                     outline=HANDLE_COLOR, width=2, dash=(4, 4))
-
         self.handles.clear()
 
-        # 8 handle + rotazione
+        # Rettangolo selezione e handle con tag per delete selettivo
+        self.canvas.create_rectangle(x, y, x+w, y+h,
+                                     outline=HANDLE_COLOR, width=2, dash=(4, 4), tags="handles")
+
         positions = {
             'nw': (x, y), 'n': (x + w//2, y), 'ne': (x + w, y),
             'e': (x + w, y + h//2), 'se': (x + w, y + h),
             's': (x + w//2, y + h), 'sw': (x, y + h), 'w': (x, y + h//2),
         }
-
-        # Handle rotazione
         rotate_x = x + w//2
         rotate_y = y - ROTATION_HANDLE_DISTANCE
         positions['rotate'] = (rotate_x, rotate_y)
 
-        self.canvas.create_line(x + w//2, y, rotate_x, rotate_y, fill=HANDLE_COLOR, width=2)
+        self.canvas.create_line(x + w//2, y, rotate_x, rotate_y, fill=HANDLE_COLOR, width=2, tags="handles")
 
         for handle_id, (hx, hy) in positions.items():
             self.handles[handle_id] = (hx, hy)
-
             if handle_id == 'rotate':
                 self.canvas.create_oval(hx - HANDLE_SIZE - 2, hy - HANDLE_SIZE - 2,
                                         hx + HANDLE_SIZE + 2, hy + HANDLE_SIZE + 2,
-                                        fill="#00aa00", outline="white", width=2)
-                self.canvas.create_text(hx, hy, text="↻", fill="white", font=('Segoe UI', 9, 'bold'))
+                                        fill="#00aa00", outline="white", width=2, tags="handles")
+                self.canvas.create_text(hx, hy, text="↻", fill="white", font=('Segoe UI', 9, 'bold'), tags="handles")
             else:
                 hs = HANDLE_SIZE // 2
                 self.canvas.create_rectangle(hx - hs, hy - hs, hx + hs, hy + hs,
-                                            fill="white", outline=HANDLE_COLOR, width=2)
+                                            fill="white", outline=HANDLE_COLOR, width=2, tags="handles")
 
     # ==================== MOUSE EVENTS ====================
 
@@ -1824,6 +1869,7 @@ class RConverter:
     def _do_canvas_resize(self):
         """Esegue il resize effettivo dopo il debounce"""
         self._resize_job = None
+        self._cached_canvas_size = (self.canvas.winfo_width(), self.canvas.winfo_height())
         if self.layers:
             self.redraw_canvas()
         else:

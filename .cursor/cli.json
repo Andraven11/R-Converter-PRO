@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(git)",
+      "Shell(cmd)",
+      "Shell(powershell)"
+    ]
+  }
+}

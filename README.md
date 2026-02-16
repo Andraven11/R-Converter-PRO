@@ -196,11 +196,18 @@ R-Converter/
 ├── R-Converter.spec           # PyInstaller spec (installer, onedir)
 ├── R-Converter_Portable.spec  # PyInstaller spec (portable, onefile)
 ├── installer.iss              # Inno Setup script (v1.3.1)
-├── _clean_and_build.bat       # Build rapida (doppio click)
-├── .cursor/rules/             # Cursor AI rules
-│   ├── project.mdc            # Regole generali progetto
-│   ├── build.mdc              # Regole build e distribuzione
-│   └── main-py.mdc            # Regole specifiche per main.py
+├── _clean_and_build.bat       # Build completa (clean + installer + portable)
+├── _build_setup.bat           # Solo generazione setup (richiede dist/)
+├── docs/                      # Documentazione tecnica
+│   ├── PERFORMANCE_IMPROVEMENTS.md
+│   └── CURSOR_GIT_SETUP.md    # Setup Cursor per git autonomo
+├── .cursor/
+│   ├── cli.json               # Permessi CLI (git, shell)
+│   └── rules/                 # Cursor AI rules
+│       ├── project.mdc        # Regole generali progetto
+│       ├── build.mdc          # Regole build e distribuzione
+│       ├── main-py.mdc        # Regole specifiche per main.py
+│       └── git-autonomy.mdc   # Regole commit/push automatici
 └── dist/                      # Output build
     ├── R-Converter/           # Versione installer (cartella)
     └── R-Converter_Portable.exe  # Versione portable (singolo exe)
@@ -277,6 +284,8 @@ class RConverter:
 ---
 
 ## Performance e Ottimizzazioni
+
+> Per suggerimenti dettagliati e analisi dei colli di bottiglia, vedi `docs/PERFORMANCE_IMPROVEMENTS.md`.
 
 ### Implementate
 

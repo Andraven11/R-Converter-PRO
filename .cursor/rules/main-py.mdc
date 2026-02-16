@@ -16,18 +16,20 @@ Il file `main.py` contiene tutto il codice sorgente (~2226 righe):
    - RESOLUTION_PRESETS (dict con 12 preset)
    - HANDLE_SIZE, HANDLE_COLOR, ROTATION_HANDLE_DISTANCE
 
-2. **ImageLayer** (classe dati, righe 80-153)
+2. **ImageLayer** (classe dati, righe 80-165)
    - Usa `__slots__` per efficienza memoria
-   - Cache trasformazioni con chiave (rotation, flip_h, flip_v)
+   - Cache trasformazioni: (rotation, flip_h, flip_v) + cache zoom (_zoom_cache, _zoom_cache_key)
+   - get_transformed_image(zoom=X) restituisce immagine gia zoomata (cache evita resize durante pan)
    - Metodo cleanup() per rilascio risorse
 
-3. **RConverter** (classe principale GUI, righe 156-2210)
-   - `__init__`: variabili stato, setup UI, D&D
+3. **RConverter** (classe principale GUI, righe 168-2240)
+   - `__init__`: variabili stato, setup UI, D&D, _cached_canvas_size, _canvas_persistent_ids
    - `setup_style`: tema dark blue con palette definita
    - `create_widgets`: layout 3 colonne (left scrollabile / canvas / right)
    - `setup_drag_and_drop`: windnd con setup ritardato 500ms, fallback tkinterdnd2
    - Layer management: load_image, load_video, remove, move, duplicate
-   - Canvas rendering: create_composite_image + draw_selection_handles
+   - Canvas rendering: create_composite_image(target_size=...) per preview, riuso oggetti canvas
+   - redraw_canvas: debounce 16ms/33ms (drag), mai bypass
    - Mouse events: drag/resize/rotate con debounce
    - Export: image (thread) + video (thread) con progress
 
@@ -45,10 +47,16 @@ Il file `main.py` contiene tutto il codice sorgente (~2226 righe):
 ### Aggiungere una nuova trasformazione layer
 1. Aggiungere attributo in ImageLayer.__slots__
 2. Inizializzare in ImageLayer.__init__
-3. Applicare in ImageLayer.get_transformed_image()
-4. Aggiornare cache_key se influenza il rendering
+3. Applicare in ImageLayer.get_transformed_image() (aggiornare base_key e zoom_key)
+4. Aggiornare cache_key se influenza il rendering; invalidate_cache() per _zoom_cache
 5. Aggiungere controllo UI nel pannello sinistro
 6. Gestire in _process_video_frame_optimized per export video
+
+### Ottimizzazioni Performance (non modificare senza motivo)
+- create_composite_image: target_size per preview (evita resize 4K->preview)
+- get_transformed_image(zoom=X): cache zoom per pan fluido
+- _cached_canvas_size: evita update_idletasks nel hot path
+- _canvas_persistent_ids: riuso bg/img/border invece di delete/create
 
 ### Export in thread separato
 ```python

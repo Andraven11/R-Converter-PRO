@@ -25,7 +25,8 @@ alwaysApply: true
 - PyInstaller >=5.0 (build)
 
 ## Struttura Chiave
-- `main.py` - Codice sorgente completo (~2226 righe, 2 classi: ImageLayer, RConverter)
+- `main.py` - Codice sorgente completo (~2250 righe, 2 classi: ImageLayer, RConverter)
+- `docs/PERFORMANCE_IMPROVEMENTS.md` - Documento suggerimenti performance e stabilita
 - `R-Converter.spec` - Build spec per versione installer (onedir)
 - `R-Converter_Portable.spec` - Build spec per versione portable (onefile, singolo .exe)
 - `build_exe.py` - Script build interattivo (usa `python -m PyInstaller`)
@@ -37,9 +38,12 @@ alwaysApply: true
 
 ### Performance
 - SEMPRE usare `__slots__` nelle classi dati
-- Cache delle trasformazioni immagine con chiave (rotation, flip_h, flip_v)
-- Debounce di 16ms (~60fps) per il redraw del canvas
-- Resampling NEAREST durante drag, BOX per preview statica, LANCZOS per export
+- Cache trasformazioni: (rotation, flip_h, flip_v) + cache zoom (evita resize ripetuti durante pan)
+- Compositing preview: create_composite_image con target_size=(preview_w, preview_h) - mai full resolution
+- Debounce: 16ms (~60fps) normale, 33ms (~30fps) durante drag (evita accumulo eventi)
+- Cache dimensioni canvas: _cached_canvas_size, update_idletasks solo se cache invalida
+- Oggetti canvas riutilizzabili: _canvas_persistent_ids per bg/img/border, tag "handles" per handle
+- Resampling: NEAREST per preview, LANCZOS per export
 - Thread separato per export (non bloccare mai la GUI)
 - Rilascio esplicito delle risorse (gc.collect per GIF, cap.release per video)
 
@@ -81,6 +85,11 @@ alwaysApply: true
 - .get() su IntVar/StringVar e' thread-safe in CPython
 - Snapshot dei valori PRIMA di entrare nel thread worker
 - Usare root.after(0, callback) per aggiornare la GUI dal thread
+
+### Git (autonomia)
+- Dopo modifiche sostanziali: eseguire SEMPRE `git add -A`, `git commit`, `git push`
+- Richiedere permesso `network` per git push
+- Vedi `.cursor/rules/git-autonomy.mdc` per dettagli
 
 ## Anti-Pattern da Evitare
 - NO print() per debug -> usa logger

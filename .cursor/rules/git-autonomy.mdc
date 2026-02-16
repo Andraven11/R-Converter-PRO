@@ -1,0 +1,36 @@
+---
+description: Autonomia Git - commit e push automatici dopo modifiche
+globs:
+alwaysApply: true
+---
+
+# Autonomia Git
+
+## Obiettivo
+Eseguire SEMPRE commit e push in autonomia dopo modifiche sostanziali al progetto. L'utente non deve eseguire comandi git manualmente.
+
+## Workflow Obbligatorio
+
+Dopo aver completato modifiche a file del progetto (codice, docs, config):
+
+1. **git add -A** - Includi tutte le modifiche (nuovi, modificati, eliminati)
+2. **git commit -m "messaggio"** - Messaggio chiaro e conciso in italiano o inglese
+3. **git push origin master** - Invia su remote
+
+## Permessi Terminale
+
+- Per **git push**: richiedi `required_permissions: ["network"]` (o `["all"]` se necessario)
+- Per **git add/commit**: permessi standard (workspace è read/write)
+
+## Formato Messaggio Commit
+
+- `feat: descrizione` - Nuova funzionalità
+- `fix: descrizione` - Correzione bug
+- `chore: descrizione` - Manutenzione, refactor, pulizia
+- `docs: descrizione` - Solo documentazione
+
+## Eccezioni
+
+- NON fare commit di file temporanei o di debug
+- NON fare commit se l'utente chiede esplicitamente di non farlo
+- Se git fallisce: riporta l'errore all'utente e suggerisci di verificare permessi/estensione

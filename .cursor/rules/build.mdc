@@ -11,7 +11,7 @@ alwaysApply: false
 IMPORTANTE: usare sempre `python -m PyInstaller` (non `pyinstaller` diretto, che potrebbe non essere nel PATH su installazioni utente).
 
 ### Build rapida (doppio click)
-Usare `_clean_and_build.bat` nella root del progetto: pulisce, builda installer e portable.
+Usare `_clean_and_build.bat` nella root del progetto: pulisce, builda installer, portable e setup Inno (se disponibile).
 
 ### Versione Installer (per Inno Setup)
 ```bash
@@ -46,15 +46,22 @@ Output: `installer_output/R-Converter_Setup_v1.3.1.exe`
 - UPX: True
 - Console: False (applicazione GUI)
 
+### Setup per altro PC
+Il file `installer_output/R-Converter_Setup_v1.3.1.exe` e' un installer Windows completo e autonomo:
+- Copia il file sul nuovo PC (chiavetta, cloud, rete)
+- Esegui con doppio click
+- Segui la procedura guidata: nessun Python o dipendenza da installare
+- Crea menu Start, disinstallazione, icona desktop (opzionale)
+
 ### Differenze tra versioni
-| Aspetto | Installer | Portable |
-|---------|-----------|----------|
-| Nome exe | R-Converter.exe | R-Converter_Portable.exe |
-| Struttura | onedir (cartella) | onefile (singolo .exe) |
-| Distribuzione | Inno Setup installer | Singolo file copiabile |
+| Aspetto | Setup (installer) | Portable |
+|---------|-------------------|----------|
+| File | R-Converter_Setup_v1.3.1.exe | R-Converter_Portable.exe |
+| Uso su altro PC | Copia setup, esegui, installa | Copia exe, esegui (nessuna installazione) |
+| Menu Start | Si | No |
+| Disinstallazione | Si (Pannello di controllo) | No (elimina la cartella) |
 | Drag & Drop | windnd | windnd |
 | Velocita avvio | Immediata | ~3-5 secondi (estrazione temp) |
-| USB | No | Si, copia e usa |
 
 ### Test Post-Build
 Dopo ogni build, verificare:
