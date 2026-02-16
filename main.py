@@ -57,7 +57,30 @@ try:
     logger.info(f"OpenCV {cv2.__version__} caricato, supporto video attivo")
 except ImportError:
     VIDEO_SUPPORT = False
+    np = None
     logger.info("OpenCV non disponibile, supporto video disattivato")
+
+# Matrice Bayer 8x8 per dither (OPT-3: pre-calcolo, riusata per ogni frame)
+_BAYER_8x8 = None
+if VIDEO_SUPPORT and np is not None:
+    _BAYER_8x8 = np.array([
+        [0, 32, 8, 40, 2, 34, 10, 42],
+        [48, 16, 56, 24, 50, 18, 58, 26],
+        [12, 44, 4, 36, 14, 46, 6, 38],
+        [60, 28, 52, 20, 62, 30, 54, 22],
+        [3, 35, 11, 43, 1, 33, 9, 41],
+        [51, 19, 59, 27, 49, 17, 57, 25],
+        [15, 47, 7, 39, 13, 45, 5, 37],
+        [63, 31, 55, 23, 61, 29, 53, 21],
+    ], dtype=np.float32) / 64.0 - 0.5
+
+
+def _precompute_bayer_tiled(h, w):
+    """Pre-calcola matrice Bayer 8x8 tiled alla dimensione (h, w). OPT-3: riusata per ogni frame."""
+    if _BAYER_8x8 is None:
+        return None
+    tiled = np.tile(_BAYER_8x8, (h // 8 + 1, w // 8 + 1))[:h, :w]
+    return tiled[:, :, np.newaxis]
 
 # Costanti per i formati supportati (set per lookup O(1))
 IMAGE_FORMATS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tiff'}
@@ -1970,9 +1993,9 @@ class RConverter:
 
         return (x, y, final_w, final_h)
 
-    def _apply_image_processing(self, img, filters, intensity=1.0):
-        """Pipeline broadcast ottimizzata: color levels, deband, denoise, bilateral, sharpen.
-        Una sola conversione PIL->numpy all'inizio, una numpy->PIL alla fine.
+    def _apply_image_processing(self, img, filters, intensity=1.0, bayer_tiled=None):
+        """Pipeline broadcast ottimizzata: color levels, deband, denoise, bilateral, sharpen, dither.
+        OPT-3: bayer_tiled pre-calcolato evita allocazione per frame. OPT-4: sharpen+dither in numpy.
         intensity: 0-1 scala i parametri (da proc_intensity)
         """
         if not filters or img is None:
@@ -2007,34 +2030,26 @@ class RConverter:
                 sigma_s = max(1, int(filters.get("bilateral_sigma_s", 2) * scale))
                 sigma_r = filters.get("bilateral_sigma_r", 0.08) * scale
                 bgr = cv2.bilateralFilter(bgr, d=5, sigmaColor=int(sigma_r * 255), sigmaSpace=sigma_s)
-            # 5. Sharpen: converti a PIL (unica conversione finale)
+            # 5+6. Sharpen + Dither in numpy (OPT-4: evita round-trip PIL<->numpy)
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(rgb)
             amt = filters.get("sharpen_amount", 0) * scale
-            if amt > 0:
-                percent = min(int(amt * 200), 200)
-                img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=percent, threshold=2))
-            # 6. Dither Bayer (anti-banding per LED wall 13-14 bit gray depth)
+            if amt > 0 and VIDEO_SUPPORT:
+                percent = min(int(amt * 200), 200) / 100.0
+                blurred = cv2.GaussianBlur(rgb, (0, 0), 1.0)
+                rgb = cv2.addWeighted(rgb, 1.0 + percent, blurred, -percent, 0)
             dither_type = filters.get("dither_type", "")
-            dither_scale = int(filters.get("dither_scale", 2) * scale)
-            if dither_type == "bayer" and dither_scale > 0 and VIDEO_SUPPORT:
-                arr = np.array(img).astype(np.float32)
-                bayer_8x8 = np.array([
-                    [0, 32, 8, 40, 2, 34, 10, 42],
-                    [48, 16, 56, 24, 50, 18, 58, 26],
-                    [12, 44, 4, 36, 14, 46, 6, 38],
-                    [60, 28, 52, 20, 62, 30, 54, 22],
-                    [3, 35, 11, 43, 1, 33, 9, 41],
-                    [51, 19, 59, 27, 49, 17, 57, 25],
-                    [15, 47, 7, 39, 13, 45, 5, 37],
-                    [63, 31, 55, 23, 61, 29, 53, 21],
-                ], dtype=np.float32) / 64.0 - 0.5
-                h, w = arr.shape[:2]
-                tiled = np.tile(bayer_8x8, (h // 8 + 1, w // 8 + 1))[:h, :w]
-                tiled = tiled[:, :, np.newaxis]
-                strength = dither_scale * 1.5
-                arr = np.clip(arr + tiled * strength, 0, 255).astype(np.uint8)
-                img = Image.fromarray(arr)
+            dither_scale_val = int(filters.get("dither_scale", 2) * scale)
+            if dither_type == "bayer" and dither_scale_val > 0 and VIDEO_SUPPORT:
+                arr_f = rgb.astype(np.float32)
+                h, w = arr_f.shape[:2]
+                if bayer_tiled is not None and bayer_tiled.shape[0] == h and bayer_tiled.shape[1] == w:
+                    tiled = bayer_tiled
+                else:
+                    tiled = _precompute_bayer_tiled(h, w)
+                if tiled is not None:
+                    strength = dither_scale_val * 1.5
+                    rgb = np.clip(arr_f + tiled * strength, 0, 255).astype(np.uint8)
+            img = Image.fromarray(rgb)
         except Exception as e:
             logger.warning(f"Processing filtri: {e}")
         return img
@@ -3043,9 +3058,43 @@ class RConverter:
         thread = threading.Thread(target=self._do_export_video, args=(filepath, layers_snapshot), daemon=True)
         thread.start()
 
-    def _build_ffmpeg_video_command(self, filepath, output_w, output_h, fps, profile, ext):
+    def _build_ffmpeg_filter_chain(self, filters, intensity=1.0):
+        """Costruisce -vf filter chain FFmpeg equivalente alla pipeline Python. OPT-2.
+        Ordine: colorlevels -> noise (deband) -> hqdn3d (denoise) -> bilateral -> unsharp.
+        Dither Bayer non disponibile in FFmpeg, resta in Python quando use_ffmpeg_filters=False.
+        """
+        if not filters:
+            return None
+        scale = max(0.01, min(1.0, float(intensity)))
+        chain = []
+        bl = filters.get("black_level", 0) * scale
+        wl_deficit = (255 - filters.get("white_level", 255)) * scale
+        if bl > 0 or wl_deficit > 0:
+            rimin = bl / 255.0
+            rimax = max(rimin + 0.01, (255.0 - wl_deficit) / 255.0)
+            chain.append(f"colorlevels=rimin={rimin:.4f}:gimin={rimin:.4f}:bimin={rimin:.4f}"
+                         f":rimax={rimax:.4f}:gimax={rimax:.4f}:bimax={rimax:.4f}")
+        grain = int(filters.get("deband_grain", 2) * scale)
+        if grain > 0:
+            noise_strength = min(grain * 3, 20)
+            chain.append(f"noise=alls={noise_strength}:allf=u+t")
+        dn = filters.get("denoise_strength", 0) * scale
+        if dn > 0.2:
+            chain.append("hqdn3d=2:2:1:1" if dn < 0.5 else "hqdn3d=4:3:2:2")
+        sigma_s = max(1, int(filters.get("bilateral_sigma_s", 2) * scale))
+        sigma_r = filters.get("bilateral_sigma_r", 0.08) * scale
+        if sigma_r > 0.01:
+            chain.append(f"bilateral=sigmaS={sigma_s}:sigmaR={sigma_r:.4f}")
+        amt = filters.get("sharpen_amount", 0) * scale
+        if amt > 0:
+            amount = min(amt * 2.0, 2.0)
+            chain.append(f"unsharp=3:3:{amount:.2f}:3:3:0")
+        return ",".join(chain) if chain else None
+
+    def _build_ffmpeg_video_command(self, filepath, output_w, output_h, fps, profile, ext, vf_chain=None):
         """Costruisce comando FFmpeg per export video broadcast.
         HAP: -an (no audio). ProRes: -vendor apl0 solo per Millumin. DNxHR: profilo, no bitrate.
+        vf_chain: se fornita, aggiunge -vf per filtri broadcast (OPT-2).
         """
         if not self.ffmpeg_path:
             return None
@@ -3053,6 +3102,8 @@ class RConverter:
         software = profile.get("software_target", "resolume")
         cmd = [self.ffmpeg_path, "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
                "-s", f"{output_w}x{output_h}", "-r", str(fps), "-i", "pipe:0"]
+        if vf_chain:
+            cmd.extend(["-vf", vf_chain])
         codec = v.get("codec", "libx264")
         pf = v.get("pixel_format", "yuv420p")
         container = v.get("container", "mp4")
@@ -3201,12 +3252,67 @@ class RConverter:
 
             logger.info(f"Export composito: {output_w}x{output_h} @ {fps}fps, {len(all_layers)} layer -> {filepath}")
 
+            # OPT-1: Pre-composito layer statici (tutti i statici prima dei video in Z order)
+            static_layers = [l for l in all_layers if not getattr(l, 'is_video', False)]
+            video_only_layers = [l for l in all_layers if getattr(l, 'is_video', False)]
+            static_before_video = True
+            found_video = False
+            for l in all_layers:
+                if getattr(l, 'is_video', False):
+                    found_video = True
+                elif found_video:
+                    static_before_video = False
+                    break
+            static_base = None
+            if static_layers and video_only_layers and static_before_video:
+                static_base = self.create_composite_image(
+                    output_w, output_h, for_export=True,
+                    video_frame_overrides={},
+                    layers=static_layers
+                )
+                static_base = static_base.convert('RGBA')
+                logger.info(f"Pre-composito statico: {len(static_layers)} layer renderizzati una volta")
+
+            # OPT-3: Pre-calcolo matrice Bayer dither (riusata per ogni frame)
+            dither_type = filters.get("dither_type", "")
+            bayer_tiled = None
+            if dither_type == "bayer" and VIDEO_SUPPORT:
+                bayer_tiled = _precompute_bayer_tiled(output_h, output_w)
+
+            # OPT-2: Filtri FFmpeg - quando dither non serve, FFmpeg applica filtri (20-50x piu veloce)
+            vf_chain = self._build_ffmpeg_filter_chain(filters, proc_int)
+            dither_scale_val = int(filters.get("dither_scale", 2) * max(0.01, min(1.0, proc_int)))
+            dither_needed = (dither_type == "bayer" and dither_scale_val > 0)
+            use_ffmpeg_filters = (vf_chain is not None and len(vf_chain) > 0 and not dither_needed)
+
             def make_composite_frame(video_frame_overrides):
-                """Crea il composito di tutti i layer con override per i video + processing broadcast"""
-                composite = self.create_composite_image(output_w, output_h, for_export=True,
-                                                        video_frame_overrides=video_frame_overrides,
-                                                        layers=all_layers)
-                composite = self._apply_image_processing(composite, filters, intensity=proc_int)
+                """Crea il composito: base statica (pre-cached) + layer video, oppure composito completo."""
+                if static_base is not None and video_only_layers:
+                    composite = static_base.copy()
+                    for layer in video_only_layers:
+                        if layer in video_frame_overrides and video_frame_overrides[layer] is not None:
+                            img = self._apply_layer_transforms_to_image(
+                                video_frame_overrides[layer], layer, for_export=True)
+                            if img is None:
+                                continue
+                            zoom_pct = layer.zoom / 100.0
+                            new_w = max(1, int(img.size[0] * zoom_pct))
+                            new_h = max(1, int(img.size[1] * zoom_pct))
+                            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                            x = (output_w - new_w) // 2 + layer.offset_x
+                            y = (output_h - new_h) // 2 + layer.offset_y
+                            try:
+                                composite.paste(img, (x, y), img)
+                            except ValueError:
+                                composite.paste(img, (x, y))
+                    composite = composite.convert('RGB')
+                else:
+                    composite = self.create_composite_image(output_w, output_h, for_export=True,
+                                                            video_frame_overrides=video_frame_overrides,
+                                                            layers=all_layers)
+                if not use_ffmpeg_filters:
+                    composite = self._apply_image_processing(composite, filters, intensity=proc_int,
+                                                            bayer_tiled=bayer_tiled)
                 return composite
 
             if ext == '.gif':
@@ -3252,14 +3358,17 @@ class RConverter:
                 return
 
             # MP4/AVI/WEBM: usa FFmpeg se disponibile (10-50x più veloce), altrimenti OpenCV
-            ff_cmd = self._build_ffmpeg_video_command(filepath, output_w, output_h, fps, profile, ext)
+            ff_cmd = self._build_ffmpeg_video_command(
+                filepath, output_w, output_h, fps, profile, ext,
+                vf_chain=vf_chain if use_ffmpeg_filters else None
+            )
             if ff_cmd and ext != '.gif':
                 # Export via FFmpeg pipe con double-buffering (pre-fetch frame)
                 try:
                     creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if sys.platform == 'win32' else 0
                     proc = subprocess.Popen(ff_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
                                             creationflags=creationflags)
-                    frame_queue = Queue(maxsize=4)
+                    frame_queue = Queue(maxsize=16)
 
                     def frame_reader():
                         """Producer: legge frame in anticipo e li mette in coda"""
@@ -3310,6 +3419,7 @@ class RConverter:
                     return
                 except Exception as ff_ex:
                     logger.warning(f"FFmpeg fallback a OpenCV: {ff_ex}")
+                    use_ffmpeg_filters = False  # OpenCV non usa filtri FFmpeg, applica processing Python
                     for cap in caps.values():
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     # Ricrea caps se necessario (alcuni non supportano seek)
@@ -3321,7 +3431,8 @@ class RConverter:
                         if cap.isOpened():
                             caps[layer] = cap
 
-            # Fallback OpenCV
+            # Fallback OpenCV: sempre processing Python (FFmpeg non in uso)
+            use_ffmpeg_filters = False
             fourcc = cv2.VideoWriter_fourcc(*'mp4v') if ext == '.mp4' else \
                      cv2.VideoWriter_fourcc(*'XVID') if ext == '.avi' else \
                      cv2.VideoWriter_fourcc(*'VP80') if ext == '.webm' else \
