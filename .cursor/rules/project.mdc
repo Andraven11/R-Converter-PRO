@@ -1,10 +1,10 @@
 ---
-description: Regole generali per il progetto R-Converter
+description: Regole generali per il progetto R-Converter PRO
 globs:
 alwaysApply: true
 ---
 
-# R-Converter - Regole Progetto
+# R-Converter PRO - Regole Progetto
 
 ## Regole per contesto
 - **project.mdc** (questo): sempre attivo
@@ -23,59 +23,137 @@ alwaysApply: true
 Prima di refactor complesso, elencare: (1) File da modificare (2) Funzionalita impattate (3) Test consigliati. Se puo rompere produzione: chiedere conferma esplicita. Procedere per step incrementali.
 
 ## Architettura
-- Applicazione desktop Python/Tkinter single-file (`main.py`)
-- GUI: Tkinter con tema dark blue custom
-- Immagini: Pillow (PIL)
-- Video: OpenCV (cv2) - opzionale
+- Applicazione desktop Python/Tkinter single-file (`main.py`) per conversione broadcast-grade
+- Destinazione: LED wall professionali per eventi live (Resolume, vMix, Millumin)
+- GUI: Tkinter con tema dark blue custom, pannello destro PRO con dropdown a cascata
+- Immagini: Pillow (PIL) + OpenCV per processing avanzato
+- Video: OpenCV (cv2) per input, FFmpeg per encoding broadcast (DNxHR, HAP Q, ProRes, H.264, H.265)
 - Drag & Drop: windnd (hook su finestra root)
 - Build: PyInstaller (onedir per installer, onefile per portable)
 - Installer: Inno Setup
-- Versione: 1.3.1
+- Versione: 2.0.0 PRO
 
 ## Stack Tecnologico
 - Python 3.8+ (testato con 3.13)
-- Pillow >=10.0.0
-- opencv-python >=4.8.0 (opzionale)
-- numpy >=1.24.0
+- Pillow >=10.0.0 (processing immagini, compositing)
+- opencv-python >=4.8.0 (bilateral filter, video input, processing avanzato)
+- numpy >=1.24.0 (array manipulation per deband/color levels)
 - windnd >=1.0.7 (necessario per drag & drop)
 - PyInstaller >=5.0 (build)
+- FFmpeg (esterno, non pip): encoding broadcast-grade (DNxHR, HAP, ProRes, H.264/H.265)
 
 ## Struttura
-- `main.py` - Sorgente unico (~2250 righe)
+- `main.py` - Sorgente unico (~3400+ righe): GUI + header FFmpeg + dati preset + IMAGE_PROFILES + CODEC_COMPATIBILITY + export engine + processing pipeline
 - `docs/` - PERFORMANCE_IMPROVEMENTS.md, CURSOR_GIT_SETUP.md
-- `_clean_and_build.bat` - Build completa (installer+portable+setup). `_build_setup.bat` - Solo setup (richiede dist/R-Converter/)
+- `*.json.code.json` - File config LED wall (holiday_inn, uniview, waveco) - DATI di riferimento, integrati in main.py
+- `File configurazioni ledwall/` - File binari originali (.rcfgx, .rcvbp) - archivio, non usati a runtime
+- `_clean_and_build.bat` - Build completa. `_build_setup.bat` - Solo setup
 - `icon.ico` - Obbligatorio in root per spec
-- `.gitignore`: _*.bat, _*.py eccetto _build_setup, _clean_and_build
+- Preset utente: `%LOCALAPPDATA%/R-Converter/presets/*.json` (creati a runtime)
+
+## Workflow Utente PRO
+1. Carica file nel progetto (immagini e/o video, drag & drop o file dialog)
+2. Seleziona risoluzione output + Hz del LED wall (25/30/50/60)
+3. Seleziona preset LED wall (6 built-in + custom da JSON)
+4. Seleziona software target (Resolume / vMix / Millumin / H.264 / H.265)
+5. Sistema auto-configura: codec, bitrate, audio, FPS, filtri, color space, bit depth
+6. Export: processing per uniformare tutti i layer + compositing + encoding ottimizzato
+7. Output: singolo file composito pronto per messa in onda
+
+## Feature Aggiuntive (v2.0+)
+- **Header bar**: titolo + stato FFmpeg + pulsante "Verifica FFmpeg" per controllare versione e codec (dnxhd, hap, prores_ks, libx264, libx265)
+- **Auto-configurazione export**: import JSON/RCFGX/RCVBP/RCG imposta automaticamente risoluzione e Hz dal preset
+- **Auto-Hz da preset built-in**: cambio LED Wall imposta Hz da input_signal_hz del preset
+- **Export immagini broadcast-grade**: IMAGE_PROFILES per tier (entry/professional/broadcast) con formato, bit_depth, dpi, compressione; export immagine usa profilo automatico
+- **CODEC_COMPATIBILITY**: dict keyed by software (resolume, vmix, millumin, generic_h264, generic_h265); note mostrate in sw_info_label al cambio Software Target
+
+## 6 Preset LED Wall Built-in
+1. NovaStar A5 Plus (Entry - 13bit, 1/16, 1920Hz)
+2. NovaStar A8 Plus (Professional - 14bit, 1/16, 3840Hz)
+3. NovaStar A10 Plus (Broadcast - 16bit, 1/32, 7680Hz)
+4. Holiday Inn Uniview GX 2.6mm (Professional - 13bit, 1/24, gamma 2.2, 3840x1152)
+5. Uniview 2.6mm Rental (Professional - 13bit, 1/24, gamma 1.8 custom)
+6. Wave&Co 2.9mm Colorlight (Professional - 14bit, 1/16, dual 50/60Hz)
+
+## 5 Software Target
+1. Resolume Arena (HAP Q - GPU accelerated) - DEFAULT
+2. vMix (DNxHR HQ - Windows broadcast)
+3. Millumin (HAP Q / ProRes 422 - macOS)
+4. Generico H.264 (massima compatibilita)
+5. Generico H.265 (migliore compressione)
 
 ## Regole di Sviluppo
 
-### Performance
-- __slots__, cache trasformazioni+zoom, compositing a target_size preview, debounce 16/33ms, _cached_canvas_size, oggetti canvas riutilizzabili. NEAREST preview, LANCZOS export. Export in thread.
+### Performance (CRITICO per broadcast)
+- __slots__, cache trasformazioni+zoom, compositing a target_size preview, debounce 16/33ms
+- _cached_canvas_size, oggetti canvas riutilizzabili (persistent_ids)
+- NEAREST preview, LANCZOS export. Export in thread separato
+- Export: snapshot contesto completo (profile, variabili) una sola volta all'avvio thread; gc.collect dopo export immagine/video
+- Video export via FFmpeg subprocess (NON frame-by-frame OpenCV - 10-50x piu lento)
+- Processing immagini: Pillow + numpy per deband/levels, cv2.bilateralFilter(d=5 max)
+- Bitrate CBR per broadcast (no VBR - garantisce qualita costante in onda)
+- GOP=1 (intra-frame only) per DNxHR/HAP/ProRes - editing e scrub istantaneo
+- Color space: Rec.709 SDR per TUTTI i preset (standard broadcast LED wall)
 
 ### Stabilita
-- Eccezioni nei callback, cv2.VideoCapture in finally, validare percorsi, logger (no print), division-by-zero, GIF max 3000 frame.
+- Eccezioni in TUTTI i callback (try/except con logger.error)
+- cv2.VideoCapture.release() in finally SEMPRE
+- Validare percorsi file (os.path.isfile) prima di qualsiasi operazione
+- Division-by-zero: max(1, denom) su output_w/output_h, scale, total_frames
+- Export: validare cartella destinazione prima di avviare thread
+- logger (no print MAI)
+- Division-by-zero check su tutte le proporzioni/scale
+- GIF max 3000 frame, timeout FFmpeg
+- FFmpeg non trovato: pulsante "Verifica FFmpeg" scarica da gyan.dev; export immagine sempre attivo
 
 ### GUI/UX
-- Tema blu notte (#0a1929), Segoe UI, emoji, sezioni colorate.
+- Tema blu notte (#0a1929), Segoe UI, emoji per sezioni
+- Header bar: titolo R-Converter PRO + stato FFmpeg + pulsante Verifica FFmpeg
+- Pannello destro: scrollabile, 6 sezioni visibili (Output+Hz, Sfondo, LED Wall, Software, Riepilogo, Export) - Processing Pre-Export nascosto, sempre al massimo
+- Pannelli sinistro e centro: INVARIATI rispetto alla versione Lite
+- Dropdown a cascata: cambio LED Wall/Software/Hz aggiorna automaticamente il riepilogo
+- Info tecnica sempre visibile: codec, bitrate, audio, FPS, filtri attivi, note CODEC_COMPATIBILITY in sw_info_label
 
 ### Drag & Drop (CRITICO per build portable)
-- windnd (hook Python sulla finestra root) - funziona con --onefile perche' e' Python puro (no DLL native)
+- windnd (hook Python sulla finestra root) - funziona con --onefile perche Python puro
 - MAI subclassing Win32 WNDPROC (SetWindowLongPtrW): crasha Tkinter immediatamente
 - Fallback: tkinterdnd2 se windnd non disponibile
-- Setup ritardato 500ms (root.after) per dare tempo alla finestra di inizializzarsi
-- collect_all('windnd') OBBLIGATORIO in entrambi i spec (installer e portable)
+- Setup ritardato 500ms (root.after)
+- collect_all('windnd') OBBLIGATORIO in spec
 - Hidden imports: windnd, windnd.windnd, ctypes, ctypes.wintypes
 
 ### Build portable funzionante
 - `python -m PyInstaller` (non pyinstaller diretto)
 - Spec: collect_all('windnd'), hidden imports PIL/cv2/numpy/windnd
+- FFmpeg essentials (~31 MB) BUNDLED in installer e portable (eseguire `python _download_ffmpeg_build.py` prima della build)
+- Percorsi ricerca: bundled (sys._MEIPASS o exe parent) -> %LOCALAPPDATA%/R-Converter/ffmpeg -> PATH -> cartelle note
+- Se FFmpeg non trovato: "Verifica FFmpeg" scarica da gyan.dev
 - Portable (onefile): R-Converter_Portable.spec -> dist/R-Converter_Portable.exe
-- D&D funziona nella portable grazie a windnd Python puro. Vedi build.mdc per dettagli.
 
 ### Logging / Thread / File
-- Log: %LOCALAPPDATA%\R-Converter\r_converter.log. Mai file nella cartella exe (utente confuso)
-- output/, exports/ in .gitignore (export utente)
-- Snapshot variabili prima del thread. root.after(0, callback) per aggiornare GUI. gc.collect per GIF, cap.release per video.
+- Log: %LOCALAPPDATA%\R-Converter\r_converter.log
+- Preset utente: %LOCALAPPDATA%\R-Converter\presets\*.json
+- Mai file nella cartella exe
+- Snapshot variabili prima del thread. root.after(0, callback) per GUI
+- gc.collect per GIF, cap.release per video
+- FFmpeg progress: parsare stderr per percentuale avanzamento
+
+### Export Broadcast-Grade
+- Tutti i layer processati PRIMA del compositing (uniformare risoluzione, rimuovere artefatti)
+- Pipeline processing: upscale/downscale Lanczos -> deband -> denoise -> color levels -> bilateral -> sharpen -> dither
+- Ordine filtri FFmpeg: scale -> deband -> hqdn3d -> colorlevels -> bilateral -> unsharp -> format+dither
+- Audio: PCM 16-bit/48kHz (professional), PCM 24-bit/48kHz (broadcast), AAC 320kbps (generico)
+- Container: MOV per DNxHR/HAP/ProRes, MP4 per H.264/H.265
+- HAP: usa -an (no audio embedded), audio come file separato se necessario
+
+### Preset System
+- 6 preset built-in hardcoded in main.py (mai modificabili dall'utente)
+- Preset custom: JSON in %LOCALAPPDATA%/R-Converter/presets/
+- Import da file config LED: .rcfgx (NovaStar ZIP+XML), .rcvbp (Colorlight), .rcg (Linsn), .json
+- Auto-detection quality tier da gray_depth: <=13=ENTRY, 14=PROFESSIONAL, >=16=BROADCAST
+- Filtri auto-generati dal quality tier + scan ratio + gamma
+- _auto_configure_from_preset: import JSON/RCFGX/RCVBP/RCG imposta risoluzione (output_resolution, physical_specs) e Hz (input_signal_hz, timing_specs)
+- _on_led_wall_change: auto-imposta output_hz da input_signal_hz del preset built-in
 
 ### Git
 - Commit e push: `git add -A && git commit -m "messaggio" && git push` (vedi git-autonomy.mdc)
@@ -88,3 +166,8 @@ Prima di refactor complesso, elencare: (1) File da modificare (2) Funzionalita i
 - NO accesso diretto a widget Tkinter da thread secondari
 - NO creare file log/temp nella cartella dell'exe (usare %LOCALAPPDATA%)
 - NO usare comando `pyinstaller` diretto (usare `python -m PyInstaller`)
+- NO frame-by-frame export video con OpenCV (usare FFmpeg subprocess)
+- NO VBR per broadcast (usare CBR per qualita costante in onda)
+- NO GOP > 1 per formati broadcast (DNxHR/HAP/ProRes = GOP 1 sempre)
+- NO gamma/color space diversi da Rec.709 SDR (standard LED wall)
+- NO modificare i 6 preset built-in - sono validati su hardware reale

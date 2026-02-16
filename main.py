@@ -1,19 +1,27 @@
 """
-R-Converter - Convertitore di Immagini e Video con supporto Collage
-Un'applicazione per adattare immagini e video a diverse risoluzioni e creare collage.
+R-Converter PRO - Convertitore Broadcast per LED Wall
+Applicazione per adattare immagini e video a risoluzioni broadcast,
+con preset ottimizzati per Resolume, vMix, Millumin e export generico.
 """
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageFilter, ImageOps
 import threading
 import math
+import re
+import zipfile
+import xml.etree.ElementTree as ET
+import subprocess
 from pathlib import Path
 import uuid
+from urllib.request import urlopen, Request
 import sys
 import os
 import logging
 import gc
+import copy
+import json
 
 # Configura logging (solo su file in temp user, non nella cartella dell'exe)
 def _get_log_path():
@@ -57,6 +65,7 @@ VIDEO_FORMATS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'}
 # Preset di risoluzioni comuni
 RESOLUTION_PRESETS = {
     "Personalizzato": None,
+    "3840x1152 (Holiday Inn 10m×3m)": (3840, 1152),
     "1920x1080 (Full HD 16:9)": (1920, 1080),
     "1280x720 (HD 16:9)": (1280, 720),
     "3840x2160 (4K 16:9)": (3840, 2160),
@@ -75,6 +84,345 @@ RESOLUTION_PRESETS = {
 HANDLE_SIZE = 8
 HANDLE_COLOR = "#4a9eff"
 ROTATION_HANDLE_DISTANCE = 25
+
+# =============================================================================
+# DATI BROADCAST PRO - Preset LED Wall e Software Target
+# =============================================================================
+
+HZ_PRESETS = [25, 30, 50, 60]
+HZ_DEFAULT = 50
+
+# Quality tier: entry < professional < broadcast
+QUALITY_ENTRY = "entry"
+QUALITY_PROFESSIONAL = "professional"
+QUALITY_BROADCAST = "broadcast"
+
+# Chiavi preset LED wall (6 built-in)
+LED_WALL_KEYS = [
+    "novastar_a5_plus",
+    "novastar_a8_plus",
+    "novastar_a10_plus",
+    "holiday_inn_uniview_gx",
+    "uniview_2_6",
+    "waveco_2_9",
+]
+
+# Chiavi software target (5 opzioni)
+SOFTWARE_KEYS = [
+    "resolume",
+    "vmix",
+    "millumin",
+    "generic_h264",
+    "generic_h265",
+]
+
+# LED Wall Specs - 6 preset validati su hardware reale
+# refresh_hz = refresh pannello; input_signal_hz = segnale HDMI (50/60)
+LED_WALL_SPECS = {
+    "novastar_a5_plus": {
+        "name": "NovaStar A5 Plus",
+        "brand": "NovaStar",
+        "receiving_card": "A5S Plus",
+        "driver_ic": "ICN2153 / MBI5124",
+        "pixel_pitch_mm": 2.5,
+        "quality_tier": QUALITY_ENTRY,
+        "gray_depth": 13,
+        "scan_type": "1/16",
+        "scan_ratio": 16,
+        "gamma": 2.2,
+        "refresh_hz": 1920,
+        "input_signal_hz": 50,
+        "optimal_fps": [25, 30, 50, 60],
+        "description": "Entry-level, 13-bit grayscale",
+    },
+    "novastar_a8_plus": {
+        "name": "NovaStar A8 Plus",
+        "brand": "NovaStar",
+        "receiving_card": "A8S Plus",
+        "driver_ic": "ICN2153S / MBI5153",
+        "pixel_pitch_mm": 2.0,
+        "quality_tier": QUALITY_PROFESSIONAL,
+        "gray_depth": 14,
+        "scan_type": "1/16",
+        "scan_ratio": 16,
+        "gamma": 2.2,
+        "refresh_hz": 3840,
+        "input_signal_hz": 50,
+        "optimal_fps": [25, 30, 50, 60],
+        "description": "Professional, 14-bit grayscale",
+    },
+    "novastar_a10_plus": {
+        "name": "NovaStar A10 Plus",
+        "brand": "NovaStar",
+        "receiving_card": "A10S Plus",
+        "driver_ic": "ICN2053 / MBI5264",
+        "pixel_pitch_mm": 1.5,
+        "quality_tier": QUALITY_BROADCAST,
+        "gray_depth": 16,
+        "scan_type": "1/32",
+        "scan_ratio": 32,
+        "gamma": 2.2,
+        "refresh_hz": 7680,
+        "input_signal_hz": 50,
+        "optimal_fps": [25, 30, 50, 60],
+        "description": "Broadcast, 16-bit grayscale",
+    },
+    "holiday_inn_uniview_gx": {
+        "name": "Holiday Inn 2.6mm Uniview GX",
+        "brand": "Uniview",
+        "receiving_card": "A5S Plus",
+        "driver_ic": "ICN2153 (ChipCode 232)",
+        "pixel_pitch_mm": 2.604,
+        "quality_tier": QUALITY_PROFESSIONAL,
+        "gray_depth": 13,
+        "scan_type": "1/24",
+        "scan_ratio": 24,
+        "gamma": 2.2,
+        "refresh_hz": 1920,
+        "input_signal_hz": 50,
+        "width_px": 192,
+        "height_px": 384,
+        "cabinet_width_mm": 500.0,
+        "cabinet_height_mm": 1000.0,
+        "optimal_fps": [25, 30, 50, 60],
+        "description": "Installazione Holiday Inn, 3840x1152, cabinet 500x1000mm",
+    },
+    "uniview_2_6": {
+        "name": "Uniview 2.6mm",
+        "brand": "Uniview",
+        "receiving_card": "A5S Plus",
+        "driver_ic": "ICN2153",
+        "pixel_pitch_mm": 2.604,
+        "quality_tier": QUALITY_PROFESSIONAL,
+        "gray_depth": 13,
+        "scan_type": "1/24",
+        "scan_ratio": 24,
+        "gamma": 1.8,
+        "refresh_hz": 1920,
+        "input_signal_hz": 50,
+        "optimal_fps": [25, 30, 50, 60],
+        "description": "Rental, gamma 1.8 custom",
+    },
+    "waveco_2_9": {
+        "name": "Wave&Co 2.9mm",
+        "brand": "Wave&Co",
+        "receiving_card": "i5A-F (Colorlight)",
+        "driver_ic": "MBI5124 / ICN2038",
+        "pixel_pitch_mm": 2.91,
+        "quality_tier": QUALITY_PROFESSIONAL,
+        "gray_depth": 14,
+        "scan_type": "1/16",
+        "scan_ratio": 16,
+        "gamma": 2.2,
+        "refresh_hz": 1920,
+        "input_signal_hz": 50,
+        "dual_frequency": True,
+        "supported_hz": [50, 60],
+        "width_px": 172,
+        "height_px": 344,
+        "optimal_fps": [25, 30, 50, 60],
+        "description": "Colorlight, dual 50/60Hz",
+    },
+}
+
+# Filtri Magic Upscale per ogni LED wall
+FILTER_PROFILES = {
+    "novastar_a5_plus": {
+        "deband_threshold": 48,
+        "deband_grain": 4,
+        "dither_type": "bayer",
+        "dither_scale": 2,
+        "black_level": 3,
+        "white_level": 252,
+        "denoise_strength": 0.40,
+        "sharpen_amount": 0.25,
+        "bilateral_sigma_s": 2,
+        "bilateral_sigma_r": 0.08,
+    },
+    "novastar_a8_plus": {
+        "deband_threshold": 40,
+        "deband_grain": 3,
+        "dither_type": "bayer",
+        "dither_scale": 2,
+        "black_level": 2,
+        "white_level": 253,
+        "denoise_strength": 0.35,
+        "sharpen_amount": 0.25,
+        "bilateral_sigma_s": 2,
+        "bilateral_sigma_r": 0.08,
+    },
+    "novastar_a10_plus": {
+        "deband_threshold": 32,
+        "deband_grain": 2,
+        "dither_type": "bayer",
+        "dither_scale": 1,
+        "black_level": 1,
+        "white_level": 254,
+        "denoise_strength": 0.30,
+        "sharpen_amount": 0.25,
+        "bilateral_sigma_s": 2,
+        "bilateral_sigma_r": 0.08,
+    },
+    "holiday_inn_uniview_gx": {
+        "deband_threshold": 44,
+        "deband_grain": 4,
+        "dither_type": "bayer",
+        "dither_scale": 2,
+        "black_level": 3,
+        "white_level": 252,
+        "denoise_strength": 0.40,
+        "sharpen_amount": 0.28,
+        "bilateral_sigma_s": 2,
+        "bilateral_sigma_r": 0.08,
+    },
+    "uniview_2_6": {
+        "deband_threshold": 44,
+        "deband_grain": 4,
+        "dither_type": "bayer",
+        "dither_scale": 2,
+        "black_level": 2,
+        "white_level": 253,
+        "denoise_strength": 0.38,
+        "sharpen_amount": 0.28,
+        "bilateral_sigma_s": 2,
+        "bilateral_sigma_r": 0.08,
+    },
+    "waveco_2_9": {
+        "deband_threshold": 42,
+        "deband_grain": 3,
+        "dither_type": "bayer",
+        "dither_scale": 2,
+        "black_level": 2,
+        "white_level": 253,
+        "denoise_strength": 0.36,
+        "sharpen_amount": 0.30,
+        "bilateral_sigma_s": 2,
+        "bilateral_sigma_r": 0.08,
+    },
+}
+
+# Profili video base (codec, container, bitrate, color space)
+VIDEO_PROFILES_BASE = {
+    "dnxhr_sq": {"codec": "dnxhd", "profile": "dnxhr_sq", "pixel_format": "yuv422p", "container": "mov",
+                 "color_space": "Rec.709", "bit_depth": 8,
+                 "bitrate_mode": "cbr", "bitrate_1080p_mbps": 145, "bitrate_4k_mbps": 580,
+                 "gop_size": 1, "b_frames": 0},
+    "dnxhr_hq": {"codec": "dnxhd", "profile": "dnxhr_hq", "pixel_format": "yuv422p", "container": "mov",
+                 "color_space": "Rec.709", "bit_depth": 8,
+                 "bitrate_mode": "cbr", "bitrate_1080p_mbps": 220, "bitrate_4k_mbps": 880,
+                 "gop_size": 1, "b_frames": 0},
+    "dnxhr_hqx": {"codec": "dnxhd", "profile": "dnxhr_hqx", "pixel_format": "yuv422p10le", "container": "mov",
+                  "color_space": "Rec.709", "bit_depth": 10,
+                  "bitrate_mode": "cbr", "bitrate_1080p_mbps": 220, "bitrate_4k_mbps": 880,
+                  "gop_size": 1, "b_frames": 0},
+    "hap": {"codec": "hap", "format_name": "hap", "pixel_format": "rgb24", "container": "mov",
+            "color_space": "sRGB", "bit_depth": 8,
+            "bitrate_mode": "vbr", "bitrate_1080p_mbps": 50, "bitrate_4k_mbps": 200,
+            "gop_size": 1, "b_frames": 0, "hap_chunks": 8},
+    "hap_q": {"codec": "hap", "format_name": "hap_q", "pixel_format": "rgb24", "container": "mov",
+              "color_space": "sRGB", "bit_depth": 8,
+              "bitrate_mode": "vbr", "bitrate_1080p_mbps": 180, "bitrate_4k_mbps": 720,
+              "gop_size": 1, "b_frames": 0, "hap_chunks": 8},
+    "prores_422": {"codec": "prores_ks", "profile": "2", "pixel_format": "yuv422p10le", "container": "mov",
+                   "color_space": "Rec.709", "bit_depth": 10,
+                   "bitrate_mode": "vbr", "bitrate_1080p_mbps": 147, "bitrate_4k_mbps": 588,
+                   "gop_size": 1, "b_frames": 0},
+    "h264_intra": {"codec": "libx264", "profile": "high", "level": "5.2", "pixel_format": "yuv420p",
+                   "container": "mp4", "color_space": "Rec.709", "bit_depth": 8,
+                   "bitrate_mode": "cbr", "bitrate_1080p_mbps": 200, "bitrate_4k_mbps": 800,
+                   "gop_size": 1, "b_frames": 0, "preset": "fast"},
+    "h265_intra": {"codec": "libx265", "profile": "main", "level": "5.1", "pixel_format": "yuv420p",
+                   "container": "mp4", "color_space": "Rec.709", "bit_depth": 8,
+                   "bitrate_mode": "cbr", "bitrate_1080p_mbps": 140, "bitrate_4k_mbps": 560,
+                   "gop_size": 1, "b_frames": 0, "preset": "medium"},
+}
+
+# Profili audio
+AUDIO_PROFILES = {
+    "pcm_16": {"codec": "pcm_s16le", "sample_rate": 48000, "bit_depth": 16, "channels": 2, "bitrate_kbps": None},
+    "pcm_24": {"codec": "pcm_s24le", "sample_rate": 48000, "bit_depth": 24, "channels": 2, "bitrate_kbps": None},
+    "aac_320": {"codec": "aac", "sample_rate": 48000, "bit_depth": 16, "channels": 2, "bitrate_kbps": 320},
+}
+
+# Profili immagine broadcast per tier (receiver card, RCFGX, software)
+IMAGE_PROFILES = {
+    QUALITY_ENTRY: {"format": "png", "bit_depth": 8, "dpi": 72, "compression": 6, "quality_pct": 85},
+    QUALITY_PROFESSIONAL: {"format": "png", "bit_depth": 8, "dpi": 150, "compression": 3, "quality_pct": 95},
+    QUALITY_BROADCAST: {"format": "png", "bit_depth": 16, "dpi": 300, "compression": 1, "quality_pct": 100},
+}
+
+# Note compatibilità per software target (sw_info_label)
+CODEC_COMPATIBILITY = {
+    "resolume": "Resolume usa GPU per HAP. HAP Q = qualità massima. No audio embedded.",
+    "vmix": "vMix usa DNxHR via CPU. HQ per HD, HQX (10-bit) per 4K.",
+    "millumin": "Millumin supporta HAP Q e ProRes 422. Vendor apl0 per compatibilità.",
+    "generic_h264": "Massima compatibilità. CBR intra-frame per scrub istantaneo.",
+    "generic_h265": "30-40% più compatto di H.264. Richiede hardware recente.",
+}
+
+
+def get_export_profile(led_wall_key, software_key, output_hz, custom_presets=None):
+    """
+    Restituisce il profilo export ottimale per la combinazione LED wall + software.
+    output_hz: frequenza segnale (25/30/50/60) - usata per FPS
+    custom_presets: {name: data} per preset custom (filtri da magic_upscale_filters)
+    """
+    custom_presets = custom_presets or {}
+    wall_spec = LED_WALL_SPECS.get(led_wall_key)
+    if not wall_spec and led_wall_key.startswith("custom_"):
+        name = led_wall_key[7:]
+        cdata = custom_presets.get(name, {})
+        gs = cdata.get("grayscale_specs", {})
+        gray = gs.get("gray_depth_bits", 14)
+        tier = QUALITY_ENTRY if gray <= 13 else (QUALITY_BROADCAST if gray >= 16 else QUALITY_PROFESSIONAL)
+        wall_spec = {"quality_tier": tier}
+        filters = cdata.get("magic_upscale_filters", FILTER_PROFILES["novastar_a8_plus"])
+    elif not wall_spec:
+        wall_spec = LED_WALL_SPECS["novastar_a8_plus"]
+        led_wall_key = "novastar_a8_plus"
+        filters = FILTER_PROFILES["novastar_a8_plus"]
+    else:
+        filters = FILTER_PROFILES.get(led_wall_key, FILTER_PROFILES["novastar_a8_plus"])
+    tier = wall_spec["quality_tier"]
+
+    # Video profile
+    if software_key == "vmix":
+        vid_key = "dnxhr_sq" if tier == QUALITY_ENTRY else "dnxhr_hq" if tier == QUALITY_PROFESSIONAL else "dnxhr_hqx"
+    elif software_key == "resolume":
+        vid_key = "hap" if tier == QUALITY_ENTRY else "hap_q"
+    elif software_key == "millumin":
+        vid_key = "prores_422" if tier == QUALITY_BROADCAST else ("hap" if tier == QUALITY_ENTRY else "hap_q")
+    elif software_key == "generic_h265":
+        vid_key = "h265_intra"
+    else:
+        vid_key = "h264_intra"
+
+    video = copy.deepcopy(VIDEO_PROFILES_BASE[vid_key])
+    video["framerate"] = min(output_hz, 60)
+
+    # Audio
+    if software_key in ("generic_h264", "generic_h265"):
+        audio = AUDIO_PROFILES["aac_320"]
+    elif tier == QUALITY_BROADCAST:
+        audio = AUDIO_PROFILES["pcm_24"]
+    else:
+        audio = AUDIO_PROFILES["pcm_16"]
+
+    # Image profile dal tier (broadcast-grade)
+    img_prof = IMAGE_PROFILES.get(tier, IMAGE_PROFILES[QUALITY_PROFESSIONAL])
+
+    return {
+        "video": video,
+        "audio": audio,
+        "filters": filters,
+        "image_format": img_prof["format"],
+        "image_bit_depth": img_prof["bit_depth"],
+        "image_dpi": img_prof["dpi"],
+        "image_compression": img_prof["compression"],
+        "image_quality_pct": img_prof["quality_pct"],
+        "led_wall_spec": wall_spec,
+        "software_target": software_key,
+    }
 
 
 class ImageLayer:
@@ -178,7 +526,7 @@ class ImageLayer:
 class RConverter:
     def __init__(self, root):
         self.root = root
-        self.root.title("R-Converter  •  Image & Video Editor")
+        self.root.title("R-Converter PRO  •  Broadcast LED Wall")
         self.root.state('zoomed')  # Fullscreen su Windows
         self.root.minsize(1100, 700)
 
@@ -190,9 +538,9 @@ class RConverter:
         self.is_video = False
         self.video_file = None
 
-        # Parametri output
+        # Parametri output (default: Holiday Inn 3840x1152 @ 50Hz)
         self.output_width = tk.IntVar(value=3840)
-        self.output_height = tk.IntVar(value=1396)
+        self.output_height = tk.IntVar(value=1152)
         self.bg_color_var = tk.StringVar(value="#000000")
 
         # Parametri qualità (inizializzati qui, usati nel pannello export)
@@ -230,17 +578,30 @@ class RConverter:
 
         # Flag per evitare re-bind ricorsivo scroll
         self._scroll_bound = False
+        self._scroll_bound_right = False
 
-        # Parametri qualità export (default: Media)
-        self.export_dpi = tk.IntVar(value=150)
-        self.export_bit_depth = tk.IntVar(value=16)
-        self.quality_preset = tk.StringVar(value="media")
+        # Parametri qualità export (gestiti da IMAGE_PROFILES via get_export_profile)
+
+        # PRO: Broadcast - variabili pannello destro
+        self.output_hz = tk.IntVar(value=HZ_DEFAULT)
+        self.led_wall_var = tk.StringVar(value="novastar_a8_plus")
+        self.software_target_var = tk.StringVar(value="resolume")
+        self.custom_presets = {}
+        # Processing sempre attivo al massimo (nascosto, obbligatorio)
+        self.proc_uniform = tk.BooleanVar(value=True)
+        self.proc_anti_solar = tk.BooleanVar(value=True)
+        self.proc_anti_flicker = tk.BooleanVar(value=True)
+        self.proc_anti_pixel = tk.BooleanVar(value=True)
+        self.proc_intensity = tk.DoubleVar(value=100.0)  # 0-100 per Scale, convertito a 0-1 in processing
+        self.ffmpeg_path = None
 
         # Setup
         self.setup_style()
         self.create_widgets()
         self.setup_bindings()
         self.setup_drag_and_drop()
+        self._find_ffmpeg()
+        self._load_presets_from_appdata()
 
         # Inizializza canvas con preview vuoto (risoluzione default)
         self.root.after(100, self.init_canvas_preview)
@@ -380,6 +741,15 @@ class RConverter:
     def create_widgets(self):
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Header bar: titolo (sinistra) | Check for Update (centro) | stato FFmpeg (destra)
+        header = ttk.Frame(main_frame)
+        header.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(header, text="R-Converter PRO", font=('Segoe UI', 12, 'bold')).pack(side=tk.LEFT)
+        ttk.Button(header, text="Verifica FFmpeg", command=self._check_and_update_ffmpeg).pack(side=tk.LEFT, expand=True, padx=20)
+        self.ffmpeg_status_label = ttk.Label(header, text="", font=('Segoe UI', 9))
+        self.ffmpeg_status_label.pack(side=tk.RIGHT)
+        self.root.after(500, self._update_ffmpeg_status_label)
 
         self.create_left_panel(main_frame)
         self.create_canvas_panel(main_frame)
@@ -615,141 +985,124 @@ class RConverter:
         self.info_label.pack()
 
     def create_right_panel(self, parent):
-        """Pannello destro - Output e Export"""
-        right_frame = ttk.Frame(parent, width=270)
-        right_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(10, 0))
-        right_frame.pack_propagate(False)
+        """Pannello destro PRO - Output, LED Wall, Software, Processing, Export"""
+        right_container = ttk.Frame(parent, width=290)
+        right_container.pack(side=tk.RIGHT, fill=tk.Y, padx=(10, 0))
+        right_container.pack_propagate(False)
 
-        # === OUTPUT ===
+        self.right_canvas = tk.Canvas(right_container, bg=self.bg_color, highlightthickness=0, width=290)
+        right_scrollbar = ttk.Scrollbar(right_container, orient="vertical", command=self.right_canvas.yview)
+        right_scrollable = ttk.Frame(self.right_canvas)
+        right_scrollable.bind("<Configure>", lambda e: self.right_canvas.configure(scrollregion=self.right_canvas.bbox("all")))
+        self.right_canvas.create_window((0, 0), window=right_scrollable, anchor="nw", width=275)
+        self.right_canvas.configure(yscrollcommand=right_scrollbar.set)
+        self.right_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        right_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.right_canvas.bind("<MouseWheel>", self.on_right_panel_scroll)
+        right_scrollable.bind("<MouseWheel>", self.on_right_panel_scroll)
+        self.right_canvas.bind("<Enter>", lambda e: self._bind_scroll_to_children_once_right(right_scrollable))
+
+        right_frame = right_scrollable
+
+        # [1] Dimensioni Output + Hz
         output_frame = ttk.LabelFrame(right_frame, text="⬡ Dimensioni Output", padding=10)
-        output_frame.pack(fill=tk.X, pady=(0, 10))
+        output_frame.pack(fill=tk.X, pady=(0, 8))
 
         ttk.Label(output_frame, text="Preset:").pack(anchor=tk.W)
         self.preset_combo = ttk.Combobox(output_frame, values=list(RESOLUTION_PRESETS.keys()), state="readonly")
-        self.preset_combo.set("1920x1080 (Full HD 16:9)")
-        self.preset_combo.pack(fill=tk.X, pady=(2, 10))
+        self.preset_combo.set("3840x1152 (Holiday Inn 10m×3m)")
+        self.preset_combo.pack(fill=tk.X, pady=(2, 5))
         self.preset_combo.bind("<<ComboboxSelected>>", self.on_preset_change)
 
         size_frame = ttk.Frame(output_frame)
         size_frame.pack(fill=tk.X)
-
         ttk.Label(size_frame, text="W:").grid(row=0, column=0)
         self.width_entry = ttk.Entry(size_frame, textvariable=self.output_width, width=7)
         self.width_entry.grid(row=0, column=1, padx=2)
-
-        ttk.Label(size_frame, text="H:").grid(row=0, column=2, padx=(10,0))
+        ttk.Label(size_frame, text="H:").grid(row=0, column=2, padx=(10, 0))
         self.height_entry = ttk.Entry(size_frame, textvariable=self.output_height, width=7)
         self.height_entry.grid(row=0, column=3, padx=2)
 
-        ttk.Button(output_frame, text="✓ Applica", command=self.apply_resolution).pack(pady=(10, 0))
+        ttk.Label(output_frame, text="Hz LED Wall:").pack(anchor=tk.W, pady=(8, 2))
+        self.hz_combo = ttk.Combobox(output_frame, values=[f"{h} Hz" for h in HZ_PRESETS], state="readonly", width=10)
+        self.hz_combo.set(f"{HZ_DEFAULT} Hz")
+        self.hz_combo.pack(fill=tk.X, pady=(0, 5))
+        self.hz_combo.bind("<<ComboboxSelected>>", self._on_hz_change)
 
-        # === SFONDO ===
+        ttk.Button(output_frame, text="✓ Applica", command=self.apply_resolution).pack(pady=(5, 0))
+
+        # [2] Sfondo
         bg_frame = ttk.LabelFrame(right_frame, text="◐ Sfondo", padding=10)
-        bg_frame.pack(fill=tk.X, pady=(0, 10))
+        bg_frame.pack(fill=tk.X, pady=(0, 8))
 
         color_grid = ttk.Frame(bg_frame)
         color_grid.pack()
-
         colors = [("#000000", "Nero"), ("#FFFFFF", "Bianco"), ("#808080", "Grigio"),
                   ("#FF0000", "Rosso"), ("#00FF00", "Verde"), ("#0000FF", "Blu"),
                   ("#FFFF00", "Giallo"), ("#FF00FF", "Magenta"), ("#00FFFF", "Ciano")]
+        for i, (color, _) in enumerate(colors):
+            btn = tk.Button(color_grid, bg=color, width=3, height=1, bd=0, activebackground=color, relief=tk.FLAT,
+                            command=lambda c=color: self.set_bg_color(c))
+            btn.grid(row=i // 3, column=i % 3, padx=2, pady=2)
+        ttk.Button(bg_frame, text="⊞ Personalizza", command=self.choose_custom_color).pack(pady=(8, 0))
 
-        for i, (color, name) in enumerate(colors):
-            btn = tk.Button(color_grid, bg=color, width=3, height=1, bd=0,
-                           activebackground=color, relief=tk.FLAT,
-                           command=lambda c=color: self.set_bg_color(c))
-            btn.grid(row=i//3, column=i%3, padx=2, pady=2)
+        # [3] LED Wall / Receiver Card
+        led_frame = ttk.LabelFrame(right_frame, text="📺 LED Wall / Receiver Card", padding=10)
+        led_frame.pack(fill=tk.X, pady=(0, 8))
 
-        ttk.Button(bg_frame, text="⊞ Personalizza", command=self.choose_custom_color).pack(pady=(10, 0))
+        led_names = [LED_WALL_SPECS[k]["name"] for k in LED_WALL_KEYS]
+        self.led_wall_combo = ttk.Combobox(led_frame, values=led_names, state="readonly", width=28)
+        self.led_wall_combo.set(LED_WALL_SPECS["novastar_a8_plus"]["name"])
+        self.led_wall_combo.pack(fill=tk.X, pady=(0, 5))
+        self.led_wall_combo.bind("<<ComboboxSelected>>", self._on_led_wall_change)
 
-        # === ESPORTAZIONE IMMAGINE ===
-        self.image_export_frame = ttk.LabelFrame(right_frame, text="◳ Esporta Immagine", padding=12)
-        self.image_export_frame.pack(fill=tk.X, pady=(0, 8))
+        self.led_info_label = ttk.Label(led_frame, text="", font=('Segoe UI', 8), wraplength=250)
+        self.led_info_label.pack(anchor=tk.W, pady=(0, 5))
 
-        # Formati in una riga ordinata
-        ttk.Label(self.image_export_frame, text="Formato:", font=('Segoe UI', 9)).pack(anchor=tk.W)
-        self.output_format = tk.StringVar(value="png")
-        img_fmt_frame = ttk.Frame(self.image_export_frame)
-        img_fmt_frame.pack(fill=tk.X, pady=(2, 8))
-        for i, fmt in enumerate(["PNG", "JPG", "WebP", "BMP"]):
-            ttk.Radiobutton(img_fmt_frame, text=fmt, variable=self.output_format,
-                           value=fmt.lower()).grid(row=0, column=i, sticky=tk.W, padx=2)
+        led_btn_frame = ttk.Frame(led_frame)
+        led_btn_frame.pack(fill=tk.X)
+        ttk.Button(led_btn_frame, text="Importa JSON", command=self._import_led_config).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(led_btn_frame, text="Salva", command=self._save_custom_preset).pack(side=tk.LEFT)
 
-        # Preset Qualità (Bassa, Media, Alta)
-        qual_preset_frame = ttk.Frame(self.image_export_frame)
-        qual_preset_frame.pack(fill=tk.X, pady=(0, 5))
-        ttk.Label(qual_preset_frame, text="Qualità:", font=('Segoe UI', 9)).pack(side=tk.LEFT)
+        # [4] Software Target
+        sw_frame = ttk.LabelFrame(right_frame, text="🎯 Software Target", padding=10)
+        sw_frame.pack(fill=tk.X, pady=(0, 8))
 
-        self.quality_preset = tk.StringVar(value="media")
-        ttk.Radiobutton(qual_preset_frame, text="Bassa", variable=self.quality_preset,
-                       value="bassa", command=self.on_quality_preset_change).pack(side=tk.LEFT, padx=3)
-        ttk.Radiobutton(qual_preset_frame, text="Media", variable=self.quality_preset,
-                       value="media", command=self.on_quality_preset_change).pack(side=tk.LEFT, padx=3)
-        ttk.Radiobutton(qual_preset_frame, text="Alta", variable=self.quality_preset,
-                       value="alta", command=self.on_quality_preset_change).pack(side=tk.LEFT, padx=3)
+        sw_names = ["Resolume Arena (HAP Q)", "vMix (DNxHR)", "Millumin (HAP Q/ProRes)",
+                    "Generico H.264", "Generico H.265"]
+        self.software_combo = ttk.Combobox(sw_frame, values=sw_names, state="readonly", width=28)
+        self.software_combo.set(sw_names[0])
+        self.software_combo.pack(fill=tk.X, pady=(0, 5))
+        self.software_combo.bind("<<ComboboxSelected>>", self._on_software_change)
 
-        # Info qualità (DPI, bit depth)
-        self.quality_info_label = ttk.Label(self.image_export_frame,
-                                            text="DPI: 150 | Bit: 16 | Compressione: 15%",
-                                            font=('Segoe UI', 8))
-        self.quality_info_label.pack(anchor=tk.W, pady=(0, 8))
+        self.sw_info_label = ttk.Label(sw_frame, text="", font=('Segoe UI', 8), wraplength=250)
+        self.sw_info_label.pack(anchor=tk.W)
 
-        self.img_export_btn = ttk.Button(self.image_export_frame, text="▶ ESPORTA IMMAGINE",
-                                         style="Green.TButton", command=self.export_image)
-        self.img_export_btn.pack(fill=tk.X, ipady=4)
+        # [5] Processing Pre-Export: nascosto, sempre al massimo (proc_* = True, proc_intensity = 100)
 
-        # === ESPORTAZIONE VIDEO ===
-        self.video_export_frame = ttk.LabelFrame(right_frame, text="▷ Esporta Video", padding=12)
-        self.video_export_frame.pack(fill=tk.X, pady=(0, 8))
+        # [6] Riepilogo Export
+        summary_frame = ttk.LabelFrame(right_frame, text="📋 Riepilogo Export", padding=10)
+        summary_frame.pack(fill=tk.X, pady=(0, 8))
 
-        # Formati video
-        ttk.Label(self.video_export_frame, text="Formato:", font=('Segoe UI', 9)).pack(anchor=tk.W)
-        self.video_format = tk.StringVar(value="mp4")
-        vid_fmt_frame = ttk.Frame(self.video_export_frame)
-        vid_fmt_frame.pack(fill=tk.X, pady=(2, 8))
-        for i, fmt in enumerate(["MP4", "AVI", "WebM", "GIF"]):
-            ttk.Radiobutton(vid_fmt_frame, text=fmt, variable=self.video_format,
-                           value=fmt.lower()).grid(row=0, column=i, sticky=tk.W, padx=2)
+        self.summary_label = ttk.Label(summary_frame, text="", font=('Segoe UI', 9), wraplength=250)
+        self.summary_label.pack(anchor=tk.W)
 
-        # FPS
-        fps_frame = ttk.Frame(self.video_export_frame)
-        fps_frame.pack(fill=tk.X, pady=(0, 5))
-        ttk.Label(fps_frame, text="FPS:", font=('Segoe UI', 9)).pack(side=tk.LEFT)
-        self.fps_var = tk.IntVar(value=30)
-        fps_entry = ttk.Entry(fps_frame, textvariable=self.fps_var, width=4)
-        fps_entry.pack(side=tk.LEFT, padx=(2, 15))
+        # [6] Export Composito
+        export_frame = ttk.LabelFrame(right_frame, text="▶ Export Composito", padding=12)
+        export_frame.pack(fill=tk.X, pady=(0, 8))
 
-        # Preset Qualità Video (Bassa, Media, Alta)
-        vid_qual_preset_frame = ttk.Frame(self.video_export_frame)
-        vid_qual_preset_frame.pack(fill=tk.X, pady=(0, 5))
-        ttk.Label(vid_qual_preset_frame, text="Qualità:", font=('Segoe UI', 9)).pack(side=tk.LEFT)
+        self.export_pro_btn = ttk.Button(export_frame, text="▶ ESPORTA COMPOSITO", style="Green.TButton",
+                                         command=self.export_project)
+        self.export_pro_btn.pack(fill=tk.X, ipady=4)
 
-        self.vid_quality_preset = tk.StringVar(value="media")
-        ttk.Radiobutton(vid_qual_preset_frame, text="Bassa", variable=self.vid_quality_preset,
-                       value="bassa", command=self.on_vid_quality_preset_change).pack(side=tk.LEFT, padx=3)
-        ttk.Radiobutton(vid_qual_preset_frame, text="Media", variable=self.vid_quality_preset,
-                       value="media", command=self.on_vid_quality_preset_change).pack(side=tk.LEFT, padx=3)
-        ttk.Radiobutton(vid_qual_preset_frame, text="Alta", variable=self.vid_quality_preset,
-                       value="alta", command=self.on_vid_quality_preset_change).pack(side=tk.LEFT, padx=3)
-
-        # Info qualità video
-        self.vid_quality = tk.IntVar(value=75)
-        self.vid_bitrate = tk.IntVar(value=5000)  # kbps
-        self.vid_quality_info_label = ttk.Label(self.video_export_frame,
-                                                text="Bitrate: 5000 kbps | CRF: 23",
-                                                font=('Segoe UI', 8))
-        self.vid_quality_info_label.pack(anchor=tk.W, pady=(0, 8))
-
-        self.vid_export_btn = ttk.Button(self.video_export_frame, text="▶ ESPORTA VIDEO",
-                                         style="Blue.TButton", command=self.export_video)
-        self.vid_export_btn.pack(fill=tk.X, ipady=4)
-
-        # Progress bar moderna
         self.progress = ttk.Progressbar(right_frame, mode='indeterminate')
         self.progress.pack(fill=tk.X, pady=(5, 10))
 
-        # Stato iniziale: video disabilitato
-        self.set_video_export_enabled(False)
+        self.fps_var = tk.IntVar(value=30)
+
+        self._on_led_wall_change(None)
+        self._on_software_change(None)
+        self.update_export_summary()
 
     def draw_empty_canvas(self):
         """Disegna canvas vuoto con stile moderno"""
@@ -799,6 +1152,128 @@ class RConverter:
         self.drag_drop_enabled = False
         # Ritarda il setup per dare tempo alla finestra di inizializzarsi
         self.root.after(500, self._do_setup_drag_and_drop)
+
+    def _find_ffmpeg(self):
+        """Cerca ffmpeg: bundled (PyInstaller), LOCALAPPDATA, PATH, cartelle note."""
+        import shutil
+        candidates = []
+        # 1. Bundled: PyInstaller onefile (sys._MEIPASS) o onedir (cartella exe)
+        if getattr(sys, 'frozen', False):
+            base = Path(sys._MEIPASS) if hasattr(sys, '_MEIPASS') else Path(sys.executable).parent
+            candidates.append(base / "ffmpeg" / "bin" / "ffmpeg.exe")
+        # 2. LOCALAPPDATA (download Check for Update)
+        if sys.platform == 'win32':
+            appdata = os.environ.get('LOCALAPPDATA', '')
+            if appdata:
+                candidates.append(Path(appdata) / "R-Converter" / "ffmpeg" / "bin" / "ffmpeg.exe")
+        # 3. PATH
+        path = shutil.which("ffmpeg")
+        if path:
+            self.ffmpeg_path = path
+            logger.info(f"FFmpeg trovato: {path}")
+            return
+        # 4. Cartelle note
+        for candidate in [
+            os.path.join(os.environ.get("PROGRAMFILES", "C:\\Program Files"), "ffmpeg", "bin", "ffmpeg.exe"),
+            os.path.join(os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)"), "ffmpeg", "bin", "ffmpeg.exe"),
+            "C:\\ffmpeg\\bin\\ffmpeg.exe",
+        ]:
+            candidates.append(Path(candidate))
+        for c in candidates:
+            p = Path(c) if not isinstance(c, Path) else c
+            if p.is_file():
+                self.ffmpeg_path = str(p)
+                logger.info(f"FFmpeg trovato: {self.ffmpeg_path}")
+                return
+        self.ffmpeg_path = None
+        logger.warning("FFmpeg non trovato - export video broadcast disabilitato")
+
+    def _check_and_update_ffmpeg(self):
+        """Verifica FFmpeg/codec e scarica da internet se mancanti."""
+        try:
+            if not self.ffmpeg_path:
+                self._find_ffmpeg()
+            missing = []
+            if self.ffmpeg_path:
+                out2 = subprocess.run([self.ffmpeg_path, "-codecs"], capture_output=True, text=True, timeout=10,
+                                      creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) or 0)
+                codecs_out = (out2.stdout or "") + (out2.stderr or "")
+                required = ["dnxhd", "hap", "prores_ks", "libx264", "libx265"]
+                for c in required:
+                    if f" {c} " not in codecs_out and f".{c} " not in codecs_out:
+                        missing.append(c)
+            needs_download = not self.ffmpeg_path or missing
+            if needs_download:
+                ok = messagebox.askyesno("Verifica FFmpeg",
+                    "FFmpeg non trovato o codec mancanti.\n\n"
+                    "Scaricare FFmpeg (~31 MB) da internet?\n"
+                    "(dnxhd, hap, prores_ks, libx264, libx265)\n\n"
+                    "Build full: https://www.gyan.dev/ffmpeg/builds/")
+                if ok:
+                    threading.Thread(target=self._download_ffmpeg, daemon=True).start()
+                return
+            out = subprocess.run([self.ffmpeg_path, "-version"], capture_output=True, text=True, timeout=5,
+                                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) or 0)
+            version_line = out.stdout.split("\n")[0] if out.stdout else "?"
+            messagebox.showinfo("Verifica FFmpeg", f"FFmpeg aggiornato.\n\n{version_line}\n\nTutti i codec presenti.")
+            self._update_ffmpeg_status_label()
+        except subprocess.TimeoutExpired:
+            messagebox.showerror("Timeout", "FFmpeg non ha risposto in tempo.")
+        except Exception as e:
+            logger.error(f"Check FFmpeg: {e}")
+            messagebox.showerror("Errore", f"Impossibile verificare FFmpeg:\n{e}")
+
+    def _download_ffmpeg(self):
+        """Scarica ffmpeg-release-essentials.zip da gyan.dev ed estrae in LOCALAPPDATA."""
+        url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+        try:
+            self.root.after(0, lambda: self.ffmpeg_status_label.config(text="Download FFmpeg..."))
+            appdata = os.environ.get('LOCALAPPDATA', '') or os.path.expanduser('~')
+            dest_dir = Path(appdata) / "R-Converter" / "ffmpeg"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            zip_path = dest_dir / "ffmpeg-release-essentials.zip"
+            req = Request(url, headers={"User-Agent": "R-Converter/2.0"})
+            with urlopen(req, timeout=60) as resp:
+                total = int(resp.headers.get("Content-Length", 0))
+                data = resp.read()
+            zip_path.write_bytes(data)
+            self.root.after(0, lambda: self.ffmpeg_status_label.config(text="Estrazione..."))
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                for name in zf.namelist():
+                    if "ffmpeg.exe" in name or "ffprobe.exe" in name:
+                        zf.extract(name, dest_dir)
+            zip_path.unlink(missing_ok=True)
+            ffmpeg_exe = None
+            for p in dest_dir.rglob("ffmpeg.exe"):
+                ffmpeg_exe = str(p)
+                break
+            if ffmpeg_exe:
+                self.ffmpeg_path = ffmpeg_exe
+                self.root.after(0, self._update_ffmpeg_status_label)
+                self.root.after(0, lambda: messagebox.showinfo("Verifica FFmpeg", "FFmpeg scaricato e installato."))
+            else:
+                raise FileNotFoundError("ffmpeg.exe non trovato nell'archivio")
+        except Exception as e:
+            logger.error(f"Download FFmpeg: {e}")
+            self.root.after(0, lambda: self.ffmpeg_status_label.config(text="FFmpeg ?"))
+            self.root.after(0, lambda: messagebox.showerror("Errore", f"Download fallito:\n{e}"))
+
+    def _update_ffmpeg_status_label(self):
+        """Aggiorna la label di stato FFmpeg nell'header"""
+        try:
+            if not self.ffmpeg_path:
+                self._find_ffmpeg()
+            if self.ffmpeg_path:
+                out = subprocess.run([self.ffmpeg_path, "-version"], capture_output=True, text=True, timeout=3,
+                                     creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) or 0)
+                line = (out.stdout or "").split("\n")[0]
+                ver = line.split("version")[1].strip().split()[0] if "version" in line else "?"
+                self.ffmpeg_status_label.config(text=f"FFmpeg {ver}")
+            else:
+                self.ffmpeg_status_label.config(text="FFmpeg non trovato")
+        except Exception:
+            if hasattr(self, 'ffmpeg_status_label'):
+                self.ffmpeg_status_label.config(text="FFmpeg ?")
 
     def _do_setup_drag_and_drop(self):
         """Setup effettivo del drag and drop (chiamato dopo init finestra)"""
@@ -912,26 +1387,6 @@ class RConverter:
                                fill=self.border_color, font=('Segoe UI', 10))
 
         self.info_label.config(text=f"Output: {output_w}x{output_h}")
-
-    def on_quality_preset_change(self):
-        """Gestisce il cambio del preset qualità"""
-        preset = self.quality_preset.get()
-
-        if preset == "bassa":
-            self.export_dpi.set(72)
-            self.export_bit_depth.set(8)
-            self.img_quality.set(60)
-            self.quality_info_label.config(text="DPI: 72 | Bit: 8 | Compressione: 40%")
-        elif preset == "media":
-            self.export_dpi.set(150)
-            self.export_bit_depth.set(16)
-            self.img_quality.set(85)
-            self.quality_info_label.config(text="DPI: 150 | Bit: 16 | Compressione: 15%")
-        else:  # alta
-            self.export_dpi.set(300)
-            self.export_bit_depth.set(24)
-            self.img_quality.set(100)
-            self.quality_info_label.config(text="DPI: 300 | Bit: 24 | Compressione: 0%")
 
     def on_lock_toggle(self):
         """Aggiorna l'icona del toggle quando cambia stato"""
@@ -1057,9 +1512,11 @@ class RConverter:
                 logger.warning(f"Immagine con dimensioni zero: {filepath}")
                 return
 
-            # Calcola la scala per contenere l'immagine nell'output
-            scale_x = output_w / img_w
-            scale_y = output_h / img_h
+            # Calcola la scala per contenere l'immagine nell'output (evita div-by-zero)
+            out_w = max(1, output_w)
+            out_h = max(1, output_h)
+            scale_x = out_w / img_w
+            scale_y = out_h / img_h
             fit_scale = min(scale_x, scale_y)
 
             # Converti in percentuale zoom (massimo 100% per non ingrandire)
@@ -1139,8 +1596,10 @@ class RConverter:
                 logger.warning(f"Video con frame di dimensioni zero: {filepath}")
                 return
 
-            scale_x = output_w / img_w
-            scale_y = output_h / img_h
+            out_w = max(1, output_w)
+            out_h = max(1, output_h)
+            scale_x = out_w / img_w
+            scale_y = out_h / img_h
             fit_scale = min(scale_x, scale_y)
             fit_zoom = int(fit_scale * 100)
             fit_zoom = min(fit_zoom, 100)
@@ -1490,50 +1949,114 @@ class RConverter:
 
         return (x, y, final_w, final_h)
 
-    def create_composite_image(self, output_w, output_h, for_export=False, target_size=None):
-        """Crea l'immagine composita di tutti i layer
+    def _apply_image_processing(self, img, filters, intensity=1.0):
+        """Pipeline broadcast: color levels, deband, denoise, bilateral, sharpen, dither.
+        intensity: 0-1 scala i parametri (da proc_intensity)
+        """
+        if not filters or img is None:
+            return img
+        try:
+            arr = np.array(img)
+            if arr.size == 0:
+                return img
+            scale = max(0.01, min(1.0, float(intensity)))
+            # 1. Color levels
+            bl = int(filters.get("black_level", 0) * scale)
+            wl = int(255 - (255 - filters.get("white_level", 255)) * scale)
+            wl = max(wl, bl + 1)
+            scale_val = 255.0 / (wl - bl)
+            arr = np.clip((arr.astype(np.float32) - bl) * scale_val, 0, 255).astype(np.uint8)
+            img = Image.fromarray(arr)
+            # 2. Deband (grain leggero per rompere banding - alternativa a FFmpeg deband)
+            grain = int(filters.get("deband_grain", 2) * scale)
+            if grain > 0 and VIDEO_SUPPORT:
+                arr = np.array(img)
+                noise = np.random.randint(-grain, grain + 1, arr.shape, dtype=np.int16)
+                arr = np.clip(arr.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+                img = Image.fromarray(arr)
+            # 3. Denoise leggero (median 3x3 se denoise_strength > 0)
+            dn = filters.get("denoise_strength", 0) * scale
+            if dn > 0.2 and VIDEO_SUPPORT:
+                bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+                k = 3 if dn < 0.5 else 5
+                filtered = cv2.medianBlur(bgr, k)
+                img = Image.fromarray(cv2.cvtColor(filtered, cv2.COLOR_BGR2RGB))
+            # 4. Bilateral
+            if VIDEO_SUPPORT and img.width * img.height < 4_500_000:
+                sigma_s = max(1, int(filters.get("bilateral_sigma_s", 2) * scale))
+                sigma_r = filters.get("bilateral_sigma_r", 0.08) * scale
+                bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+                filtered = cv2.bilateralFilter(bgr, d=5, sigmaColor=int(sigma_r * 255), sigmaSpace=sigma_s)
+                img = Image.fromarray(cv2.cvtColor(filtered, cv2.COLOR_BGR2RGB))
+            # 5. Sharpen
+            amt = filters.get("sharpen_amount", 0) * scale
+            if amt > 0:
+                percent = min(int(amt * 200), 200)
+                img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=percent, threshold=2))
+            # 6. Dither (per export a bit depth inferiore - opzionale, qui skip per PNG 8bit)
+            # Il dither e' applicato da FFmpeg per video; per immagini PNG manteniamo full depth
+        except Exception as e:
+            logger.warning(f"Processing filtri: {e}")
+        return img
+
+    def _apply_layer_transforms_to_image(self, img, layer):
+        """Applica flip e rotation di un layer a un'immagine (per override frame video nel composito)"""
+        if img is None:
+            return None
+        img = img.copy()
+        if img.mode != 'RGBA':
+            img = img.convert('RGBA')
+        if layer.flip_h:
+            img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        if layer.flip_v:
+            img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+        if layer.rotation != 0:
+            img = img.rotate(-layer.rotation, resample=Image.Resampling.BILINEAR, expand=True)
+        return img
+
+    def create_composite_image(self, output_w, output_h, for_export=False, target_size=None,
+                               video_frame_overrides=None):
+        """Crea l'immagine composita di tutti i layer (immagini + video)
 
         Args:
             output_w, output_h: dimensioni output (logiche)
             for_export: se True usa LANCZOS per qualità migliore
             target_size: (w, h) - se fornito, crea direttamente a questa dimensione
-                        (evita resize successivo, molto più veloce per la preview)
+            video_frame_overrides: {layer: PIL.Image} - frame corrente per layer video (export video)
         """
-        # Protezione dimensioni minime
         output_w = max(1, output_w)
         output_h = max(1, output_h)
+        video_frame_overrides = video_frame_overrides or {}
 
-        # Per la preview: crea direttamente a target_size evitando resize enorme
         if target_size:
             target_w, target_h = target_size
             target_w = max(1, target_w)
             target_h = max(1, target_h)
             scale = min(target_w / output_w, target_h / output_h)
             out_img = Image.new('RGBA', (target_w, target_h), color=self.bg_color_var.get())
-            resample = Image.Resampling.NEAREST  # Veloce per preview
+            resample = Image.Resampling.NEAREST
         else:
             scale = 1.0
             out_img = Image.new('RGBA', (output_w, output_h), color=self.bg_color_var.get())
             resample = Image.Resampling.LANCZOS if for_export else Image.Resampling.BILINEAR
 
-        # Disegna ogni layer dal basso verso l'alto
         for layer in self.layers:
             try:
+                if layer in video_frame_overrides and video_frame_overrides[layer] is not None:
+                    img = self._apply_layer_transforms_to_image(video_frame_overrides[layer], layer)
+                else:
+                    img = layer.get_transformed_image(use_cache=True,
+                        zoom=layer.zoom if target_size else None)
+                if img is None:
+                    continue
+
                 if target_size:
-                    # Preview: usa cache zoom (evita resize ripetuti durante pan)
-                    img = layer.get_transformed_image(use_cache=True, zoom=layer.zoom)
-                    if img is None:
-                        continue
                     new_w = max(1, int(img.size[0] * scale))
                     new_h = max(1, int(img.size[1] * scale))
                     img = img.resize((new_w, new_h), resample)
                     x = (target_w - new_w) // 2 + int(layer.offset_x * scale)
                     y = (target_h - new_h) // 2 + int(layer.offset_y * scale)
                 else:
-                    # Export: base + resize con LANCZOS per qualità massima
-                    img = layer.get_transformed_image(use_cache=True, zoom=None)
-                    if img is None:
-                        continue
                     zoom_pct = layer.zoom / 100.0
                     new_w = max(1, int(img.size[0] * zoom_pct))
                     new_h = max(1, int(img.size[1] * zoom_pct))
@@ -1592,10 +2115,10 @@ class RConverter:
         if canvas_w < 10 or canvas_h < 10:
             return
 
-        output_w = self.output_width.get()
-        output_h = self.output_height.get()
+        output_w = max(1, self.output_width.get())
+        output_h = max(1, self.output_height.get())
 
-        # Scala preview
+        # Scala preview (evita div-by-zero)
         self.preview_scale = min(canvas_w / output_w, canvas_h / output_h) * 0.9
         preview_w = int(output_w * self.preview_scale)
         preview_h = int(output_h * self.preview_scale)
@@ -1860,6 +2383,25 @@ class RConverter:
             child.bind("<MouseWheel>", self.on_left_panel_scroll)
             self._bind_scroll_to_children(child)
 
+    def on_right_panel_scroll(self, event):
+        """Scroll del pannello destro con mouse wheel"""
+        if event.delta != 0 and hasattr(self, 'right_canvas'):
+            self.right_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        return "break"
+
+    def _bind_scroll_to_children_once_right(self, widget):
+        """Bind ricorsivo scroll pannello destro (una sola volta)"""
+        if self._scroll_bound_right:
+            return
+        self._scroll_bound_right = True
+        self._bind_scroll_to_children_right(widget)
+
+    def _bind_scroll_to_children_right(self, widget):
+        """Bind ricorsivo scroll a figli del pannello destro"""
+        for child in widget.winfo_children():
+            child.bind("<MouseWheel>", self.on_right_panel_scroll)
+            self._bind_scroll_to_children_right(child)
+
     def on_canvas_resize(self, event):
         """Gestisce il resize del canvas con debounce per evitare lag"""
         if self._resize_job is not None:
@@ -1906,6 +2448,416 @@ class RConverter:
         except (ValueError, tk.TclError):
             messagebox.showerror("Errore", "Valori non validi")
 
+    def _on_hz_change(self, event=None):
+        """Callback cambio Hz - aggiorna output_hz e riepilogo"""
+        try:
+            s = self.hz_combo.get()
+            hz = int(s.replace(" Hz", "").strip())
+            self.output_hz.set(hz)
+            self.fps_var.set(min(hz, 60))
+            self.update_export_summary()
+        except (ValueError, tk.TclError):
+            pass
+
+    def _on_led_wall_change(self, event=None):
+        """Callback cambio LED Wall - aggiorna led_wall_var, info e auto-imposta Hz da input_signal_hz"""
+        try:
+            name = self.led_wall_combo.get()
+            for key in LED_WALL_KEYS:
+                if LED_WALL_SPECS[key]["name"] == name:
+                    self.led_wall_var.set(key)
+                    spec = LED_WALL_SPECS[key]
+                    info = f"{spec['receiving_card']} | {spec['gray_depth']}bit | {spec['scan_type']} | {spec['refresh_hz']}Hz"
+                    self.led_info_label.config(text=info)
+                    hz = spec.get("input_signal_hz")
+                    if hz and hz in HZ_PRESETS:
+                        self.output_hz.set(hz)
+                        self.hz_combo.set(f"{hz} Hz")
+                    self.update_export_summary()
+                    return
+            if name in self.custom_presets:
+                self.led_wall_var.set(f"custom_{name}")
+                data = self.custom_presets[name]
+                hw = data.get("hardware", {})
+                gs = data.get("grayscale_specs", {})
+                info = f"{hw.get('receiving_card', '?')} | {gs.get('gray_depth_bits', '?')}bit | Custom"
+                self.led_info_label.config(text=info)
+                hz = data.get("input_signal_hz")
+                if hz and hz in HZ_PRESETS:
+                    self.output_hz.set(hz)
+                    self.hz_combo.set(f"{hz} Hz")
+            self.update_export_summary()
+        except (KeyError, tk.TclError):
+            pass
+
+    def _on_software_change(self, event=None):
+        """Callback cambio Software Target - aggiorna software_target_var"""
+        try:
+            sw_names = ["Resolume Arena (HAP Q)", "vMix (DNxHR)", "Millumin (HAP Q/ProRes)",
+                        "Generico H.264", "Generico H.265"]
+            sel = self.software_combo.get()
+            idx = sw_names.index(sel) if sel in sw_names else 0
+            key = SOFTWARE_KEYS[idx]
+            self.software_target_var.set(key)
+            profile = get_export_profile(self.led_wall_var.get(), key, self.output_hz.get(),
+                                         custom_presets=self.custom_presets)
+            v = profile["video"]
+            codec = v.get("format_name") or v.get("codec", "")
+            if v.get("profile"):
+                codec = f"{codec} {v['profile']}"
+            note = CODEC_COMPATIBILITY.get(key, "")
+            txt = f"Codec: {codec} | {v.get('container', 'mov').upper()}"
+            if note:
+                txt += f"\n{note}"
+            self.sw_info_label.config(text=txt)
+            self.update_export_summary()
+        except (KeyError, ValueError, tk.TclError):
+            pass
+
+    def update_export_summary(self):
+        """Aggiorna il riepilogo export in base alle selezioni correnti"""
+        try:
+            profile = get_export_profile(
+                self.led_wall_var.get(),
+                self.software_target_var.get(),
+                self.output_hz.get(),
+                custom_presets=self.custom_presets
+            )
+            v, a, f = profile["video"], profile["audio"], profile["filters"]
+            codec = v.get("format_name") or v.get("codec", "?")
+            if v.get("profile"):
+                codec = f"{codec} {v['profile']}"
+            br = v.get("bitrate_1080p_mbps", 0)
+            pf = v.get("pixel_format", "yuv420p")
+            cs = v.get("color_space", "Rec.709")
+            bd = v.get("bit_depth", 8)
+            audio_str = f"PCM {a['bit_depth']}bit" if a["codec"].startswith("pcm") else f"AAC {a.get('bitrate_kbps', 0)}k"
+            txt = f"Video: {codec} / {v.get('container', 'mov').upper()}\n"
+            txt += f"Bitrate: {br} Mbps @ 1080p | FPS: {v.get('framerate', 30)}\n"
+            txt += f"Bit: {bd}bit | Spazio colore: {cs} {pf.upper()}\n"
+            txt += f"Audio: {audio_str} @ {a['sample_rate']}Hz\n"
+            txt += f"Filtri: Deband({f['deband_threshold']}) | Sharp({f['sharpen_amount']})"
+            self.summary_label.config(text=txt)
+        except Exception as e:
+            logger.warning(f"update_export_summary: {e}")
+            self.summary_label.config(text="Riepilogo non disponibile")
+
+    def _parse_rcfgx(self, filepath):
+        """Parsa file RCFGX NovaStar (ZIP con XML) o RCFG (XML diretto)"""
+        result = {"brand": "NovaStar", "receiving_card": "A5S Plus"}
+        try:
+            if str(filepath).lower().endswith(".rcfgx"):
+                with zipfile.ZipFile(filepath, "r") as zf:
+                    rcfg_files = [f for f in zf.namelist() if f.lower().endswith(".rcfg")]
+                    if not rcfg_files:
+                        raise ValueError("Nessun file .rcfg nell'archivio")
+                    xml_content = zf.read(rcfg_files[0])
+                    root = ET.fromstring(xml_content)
+            else:
+                tree = ET.parse(filepath)
+                root = tree.getroot()
+            for elem in root.iter():
+                tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+                txt = (elem.text or "").strip()
+                if not txt:
+                    continue
+                if tag == "ModuleWidth":
+                    result["module_width"] = int(txt)
+                elif tag == "ModuleHeight":
+                    result["module_height"] = int(txt)
+                elif tag == "DriverChipType":
+                    result["driver_ic"] = txt
+                elif tag == "GrayLevel":
+                    result["gray_depth"] = int(txt)
+                elif tag == "RefreshRate":
+                    result["refresh_hz"] = int(txt)
+                elif tag in ("ScanType", "ScanNum"):
+                    try:
+                        result["scan_ratio"] = int(txt)
+                        result["scan_type"] = f"1/{txt}"
+                    except ValueError:
+                        result["scan_type"] = txt
+                elif tag == "GammaValue":
+                    try:
+                        result["gamma"] = float(txt)
+                    except ValueError:
+                        pass
+                elif tag == "PixelPitch":
+                    try:
+                        result["pixel_pitch_mm"] = float(txt)
+                    except ValueError:
+                        pass
+            gray = result.get("gray_depth", 14)
+            result["quality_tier"] = QUALITY_ENTRY if gray <= 13 else (QUALITY_BROADCAST if gray >= 16 else QUALITY_PROFESSIONAL)
+            result["input_signal_hz"] = 50
+            result["optimal_fps"] = [25, 30, 50, 60]
+        except Exception as e:
+            logger.warning(f"Parse RCFGX: {e}")
+        return result
+
+    def _parse_rcvbp_filename(self, filepath):
+        """Estrae parametri dal nome file RCVBP Colorlight"""
+        name = Path(filepath).stem.upper()
+        result = {"brand": "Colorlight", "receiving_card": "i5A-F"}
+        pitch_match = re.search(r"[PA](\d+\.?\d*)", name)
+        if pitch_match:
+            result["pixel_pitch_mm"] = float(pitch_match.group(1))
+        scan_match = re.search(r"(\d+)S", name)
+        if scan_match:
+            result["scan_ratio"] = int(scan_match.group(1))
+            result["scan_type"] = f"1/{scan_match.group(1)}"
+        for ic in ["MBI5124", "MBI5153", "MBI5264", "ICN2153", "ICN2038", "ICN2053"]:
+            if ic in name:
+                result["driver_ic"] = ic
+                break
+        hz_match = re.search(r"(\d+)HZ", name)
+        if hz_match:
+            result["refresh_hz"] = int(hz_match.group(1))
+        result["gray_depth"] = result.get("gray_depth", 14)
+        result["quality_tier"] = QUALITY_PROFESSIONAL
+        result["gamma"] = 2.2
+        result["input_signal_hz"] = 50
+        result["optimal_fps"] = [25, 30, 50, 60]
+        return result
+
+    def _parse_rcg_filename(self, filepath):
+        """Estrae parametri dal nome file RCG Linsn (supporto base)"""
+        name = Path(filepath).stem.upper()
+        result = {"brand": "Linsn", "receiving_card": "Linsn"}
+        pitch_match = re.search(r"[PA](\d+\.?\d*)", name)
+        if pitch_match:
+            result["pixel_pitch_mm"] = float(pitch_match.group(1))
+        result["gray_depth"] = 14
+        result["quality_tier"] = QUALITY_PROFESSIONAL
+        result["scan_type"] = "1/16"
+        result["gamma"] = 2.2
+        result["refresh_hz"] = 1920
+        result["input_signal_hz"] = 50
+        result["optimal_fps"] = [25, 30, 50, 60]
+        return result
+
+    def _auto_configure_from_preset(self, data):
+        """Auto-configura risoluzione e Hz dal preset/JSON importato"""
+        if not data:
+            return
+        try:
+            # Risoluzione: cerca output_resolution, resolution, total_width_px, width_px, physical_specs
+            w, h = None, None
+            if "output_resolution" in data:
+                r = data["output_resolution"]
+                if isinstance(r, (list, tuple)) and len(r) >= 2:
+                    w, h = int(r[0]), int(r[1])
+            elif "resolution" in data:
+                r = data["resolution"]
+                if isinstance(r, dict):
+                    w = r.get("width") or r.get("output_width")
+                    h = r.get("height") or r.get("output_height")
+                    if w is not None and h is not None:
+                        w, h = int(w), int(h)
+            elif "total_width_px" in data and "total_height_px" in data:
+                w, h = int(data["total_width_px"]), int(data["total_height_px"])
+            else:
+                ps = data.get("physical_specs", {})
+                mw = ps.get("module_width_pixels") or ps.get("width_pixels")
+                mh = ps.get("module_height_pixels") or ps.get("height_pixels")
+                mc = ps.get("module_cols", 1)
+                mr = ps.get("module_rows", 1)
+                if mw is not None and mh is not None:
+                    w = int(mw) * int(mc) if mc else int(mw)
+                    h = int(mh) * int(mr) if mr else int(mh)
+            if w and h and 64 <= w <= 8192 and 64 <= h <= 8192:
+                self.output_width.set(w)
+                self.output_height.set(h)
+                self.preset_combo.set("Personalizzato")
+                logger.info(f"Auto-config risoluzione: {w}x{h}")
+            # Hz: input_signal_hz, timing_specs.refresh_hz (50/60), hardware
+            hz = None
+            if "input_signal_hz" in data:
+                hz = int(data["input_signal_hz"])
+            elif "timing_specs" in data:
+                ts = data["timing_specs"]
+                rhz = ts.get("refresh_hz") or ts.get("ref_num_per_vs")
+                if rhz is not None:
+                    rhz = int(rhz)
+                    hz = 60 if rhz >= 55 else 50 if rhz >= 45 else 30
+            if hz and hz in HZ_PRESETS:
+                self.output_hz.set(hz)
+                self.hz_combo.set(f"{hz} Hz")
+                logger.info(f"Auto-config Hz: {hz}")
+        except Exception as e:
+            logger.warning(f"Auto-config preset: {e}")
+
+    def _config_to_led_spec(self, parsed):
+        """Converte dati parsati in preset custom con filtri auto-generati"""
+        gray = parsed.get("gray_depth", 14)
+        tier = QUALITY_ENTRY if gray <= 13 else (QUALITY_BROADCAST if gray >= 16 else QUALITY_PROFESSIONAL)
+        base_filters = FILTER_PROFILES["novastar_a8_plus"]
+        if tier == QUALITY_ENTRY:
+            base_filters = FILTER_PROFILES["novastar_a5_plus"]
+        elif tier == QUALITY_BROADCAST:
+            base_filters = FILTER_PROFILES["novastar_a10_plus"]
+        ps = {"pixel_pitch_mm": parsed.get("pixel_pitch_mm", 2.5)}
+        if parsed.get("module_width") and parsed.get("module_height"):
+            ps["module_width_pixels"] = parsed["module_width"]
+            ps["module_height_pixels"] = parsed["module_height"]
+            ps["module_cols"] = 1
+            ps["module_rows"] = 1
+        return {
+            "led_wall_name": parsed.get("led_wall_name", "Importato"),
+            "hardware": {"brand": parsed.get("brand", "?"), "receiving_card": parsed.get("receiving_card", "?")},
+            "physical_specs": ps,
+            "grayscale_specs": {"gray_depth_bits": gray, "scan_ratio": parsed.get("scan_type", "1/16")},
+            "magic_upscale_filters": dict(base_filters),
+            "input_signal_hz": parsed.get("input_signal_hz", 50),
+        }
+
+    def _get_presets_dir(self):
+        """Restituisce la cartella preset utente (%LOCALAPPDATA%/R-Converter/presets)"""
+        appdata = os.environ.get('LOCALAPPDATA', os.path.expanduser('~'))
+        presets_dir = Path(appdata) / 'R-Converter' / 'presets'
+        try:
+            presets_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return presets_dir
+
+    def _load_presets_from_appdata(self):
+        """Carica preset JSON dalla cartella %LOCALAPPDATA%/R-Converter/presets/"""
+        presets_dir = self._get_presets_dir()
+        if not presets_dir.exists():
+            return
+        for p in presets_dir.glob("*.json"):
+            try:
+                with open(p, encoding="utf-8") as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    raise ValueError("Preset non valido")
+                name = data.get("led_wall_name", p.stem) or p.stem
+                if "magic_upscale_filters" not in data:
+                    data["magic_upscale_filters"] = dict(FILTER_PROFILES["novastar_a8_plus"])
+                if "grayscale_specs" not in data:
+                    data["grayscale_specs"] = {"gray_depth_bits": 14, "scan_ratio": "1/16"}
+                self.custom_presets[name] = data
+                led_names = list(self.led_wall_combo["values"])
+                if name not in led_names:
+                    led_names.append(name)
+                    self.led_wall_combo["values"] = led_names
+                logger.info(f"Preset caricato: {name}")
+            except Exception as e:
+                logger.warning(f"Preset {p.name} non caricato: {e}")
+
+    def _import_led_config(self):
+        """Importa preset da file JSON o config LED (RCFGX, RCVBP, RCG)"""
+        path = filedialog.askopenfilename(
+            title="Importa configurazione LED",
+            filetypes=[
+                ("File configurazione LED", "*.json *.rcfgx *.rcfg *.rcvbp *.rcg"),
+                ("NovaStar RCFGX/RCFG", "*.rcfgx *.rcfg"),
+                ("Colorlight RCVBP", "*.rcvbp"),
+                ("Linsn RCG", "*.rcg"),
+                ("Preset JSON", "*.json"),
+                ("Tutti", "*.*"),
+            ]
+        )
+        if not path:
+            return
+        try:
+            path_lower = path.lower()
+            if path_lower.endswith(".json"):
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                name = data.get("led_wall_name", Path(path).stem)
+            elif path_lower.endswith((".rcfgx", ".rcfg")):
+                parsed = self._parse_rcfgx(path)
+                parsed["led_wall_name"] = f"Importato: {Path(path).stem}"
+                data = self._config_to_led_spec(parsed)
+                name = data["led_wall_name"]
+                self._auto_configure_from_preset(data)
+                messagebox.showinfo("Import", f"Config NovaStar importata.\nVerifica i parametri estratti.")
+            elif path_lower.endswith(".rcvbp"):
+                parsed = self._parse_rcvbp_filename(path)
+                parsed["led_wall_name"] = f"Importato: {Path(path).stem}"
+                data = self._config_to_led_spec(parsed)
+                name = data["led_wall_name"]
+                self._auto_configure_from_preset(data)
+                messagebox.showinfo("Import", f"Config Colorlight importata.\nParametri estratti dal nome file.")
+            elif path_lower.endswith(".rcg"):
+                parsed = self._parse_rcg_filename(path)
+                parsed["led_wall_name"] = f"Importato: {Path(path).stem}"
+                data = self._config_to_led_spec(parsed)
+                name = data["led_wall_name"]
+                self._auto_configure_from_preset(data)
+                messagebox.showinfo("Import", "File Linsn RCG importato.\nVerifica i parametri estratti.")
+            else:
+                messagebox.showwarning("Formato", "Formato file non supportato.")
+                return
+            self.custom_presets[name] = data
+            led_names = list(self.led_wall_combo["values"])
+            if name not in led_names:
+                led_names.append(name)
+                self.led_wall_combo["values"] = led_names
+            self.led_wall_combo.set(name)
+            self.led_wall_var.set(f"custom_{name}")
+            self.led_info_label.config(text=f"Importato: {name}")
+            self._auto_configure_from_preset(data)
+            self.update_export_summary()
+            logger.info(f"Preset importato: {name}")
+        except Exception as e:
+            logger.error(f"Import preset: {e}")
+            messagebox.showerror("Errore", f"Impossibile importare:\n{e}")
+
+    def _save_custom_preset(self):
+        """Salva il preset corrente come JSON (in preset folder o percorso scelto)"""
+        key = self.led_wall_var.get()
+        name = self.led_wall_combo.get()
+        data = None
+        if key in LED_WALL_KEYS:
+            spec = LED_WALL_SPECS[key]
+            filters = FILTER_PROFILES[key]
+            data = {
+                "led_wall_name": spec["name"],
+                "hardware": {"brand": spec["brand"], "receiving_card": spec["receiving_card"]},
+                "physical_specs": {"pixel_pitch_mm": spec["pixel_pitch_mm"]},
+                "grayscale_specs": {"gray_depth_bits": spec["gray_depth"], "scan_ratio": spec["scan_type"]},
+                "magic_upscale_filters": dict(filters),
+            }
+        elif name in self.custom_presets:
+            data = self.custom_presets[name]
+        if not data:
+            messagebox.showinfo("Info", "Seleziona un preset built-in da modificare,\no importa un JSON da salvare.")
+            return
+        presets_dir = self._get_presets_dir()
+        default_name = f"{data.get('led_wall_name', name)}.json".replace(" ", "_")
+        path = filedialog.asksaveasfilename(
+            title="Salva preset",
+            defaultextension=".json",
+            initialdir=str(presets_dir) if presets_dir.exists() else None,
+            initialfile=default_name,
+            filetypes=[("JSON", "*.json")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            logger.info(f"Preset salvato: {path}")
+            messagebox.showinfo("Successo", f"Preset salvato:\n{path}")
+        except Exception as e:
+            logger.error(f"Salva preset: {e}")
+            messagebox.showerror("Errore", str(e))
+
+    def export_project(self):
+        """Export composito - placeholder, usa export_image per ora"""
+        if not self.layers:
+            messagebox.showwarning("Avviso", "Aggiungi almeno un elemento al progetto")
+            return
+        has_video = any(getattr(l, "is_video", False) for l in self.layers)
+        if has_video:
+            video_layers = [l for l in self.layers if getattr(l, "is_video", False)]
+            self.export_video()
+        else:
+            self.export_image()
+
     def set_bg_color(self, color):
         self.bg_color_var.set(color)
         self.redraw_canvas()
@@ -1916,47 +2868,21 @@ class RConverter:
         if color[1]:
             self.set_bg_color(color[1])
 
-    def on_img_quality_change(self, event=None):
-        """Aggiorna info qualità (usato internamente)"""
-        pass  # Info qualità aggiornata tramite preset
-
-    def on_vid_quality_preset_change(self, event=None):
-        """Aggiorna i parametri video in base al preset selezionato"""
-        preset = self.vid_quality_preset.get()
-        if preset == "bassa":
-            self.vid_quality.set(50)
-            self.vid_bitrate.set(2000)
-            info_text = "Bitrate: 2000 kbps | CRF: 28"
-        elif preset == "media":
-            self.vid_quality.set(75)
-            self.vid_bitrate.set(5000)
-            info_text = "Bitrate: 5000 kbps | CRF: 23"
-        else:  # alta
-            self.vid_quality.set(100)
-            self.vid_bitrate.set(8000)
-            info_text = "Bitrate: 8000 kbps | CRF: 18"
-        self.vid_quality_info_label.config(text=info_text)
-
     def set_video_export_enabled(self, enabled):
-        """Abilita/disabilita il box esportazione video"""
-        state = 'normal' if enabled else 'disabled'
-        for child in self.video_export_frame.winfo_children():
-            self._set_widget_state(child, state)
-        # Cambia colore del frame
-        if enabled:
-            self.video_export_frame.config(text="🎬 Esporta Video")
-        else:
-            self.video_export_frame.config(text="🎬 Esporta Video (nessun video)")
+        """Compatibilità - PRO: abilita export se ci sono layer"""
+        self._update_export_btn_state()
 
     def set_image_export_enabled(self, enabled):
-        """Abilita/disabilita il box esportazione immagine"""
-        state = 'normal' if enabled else 'disabled'
-        for child in self.image_export_frame.winfo_children():
-            self._set_widget_state(child, state)
-        if enabled:
-            self.image_export_frame.config(text="🖼️ Esporta Immagine")
-        else:
-            self.image_export_frame.config(text="🖼️ Esporta Immagine (nessuna immagine)")
+        """Compatibilità - PRO: abilita export se ci sono layer"""
+        self._update_export_btn_state()
+
+    def _update_export_btn_state(self):
+        """Abilita/disabilita pulsante Export Composito in base ai layer"""
+        try:
+            state = 'normal' if self.layers else 'disabled'
+            self.export_pro_btn.config(state=state)
+        except (AttributeError, tk.TclError):
+            pass
 
     def _set_widget_state(self, widget, state):
         """Imposta ricorsivamente lo stato di un widget e i suoi figli"""
@@ -1999,22 +2925,30 @@ class RConverter:
     # ==================== EXPORT ====================
 
     def export_image(self):
-        """Esporta come immagine"""
+        """Esporta come immagine (formato e qualità dal profilo LED wall + software)"""
         if not self.layers:
             messagebox.showwarning("Avviso", "Aggiungi almeno un'immagine")
             return
 
-        fmt = self.output_format.get()
+        profile = get_export_profile(
+            self.led_wall_var.get(), self.software_target_var.get(), self.output_hz.get(),
+            custom_presets=self.custom_presets
+        )
+        fmt = profile.get("image_format", "png")
         ext = f".{fmt}"
 
         filepath = filedialog.asksaveasfilename(
             title="Salva collage",
             defaultextension=ext,
             initialfile=f"collage{ext}",
-            filetypes=[(fmt.upper(), f"*{ext}")]
+            filetypes=[(fmt.upper(), f"*{ext}"), ("PNG", "*.png"), ("JPEG", "*.jpg"), ("Tutti", "*.*")]
         )
 
         if not filepath:
+            return
+        out_dir = Path(filepath).parent
+        if not out_dir.exists():
+            messagebox.showerror("Errore", f"Cartella di destinazione non esiste:\n{out_dir}")
             return
 
         self.progress.start()
@@ -2026,6 +2960,10 @@ class RConverter:
         if not VIDEO_SUPPORT:
             messagebox.showerror("Errore", "OpenCV non installato. Installa con: pip install opencv-python")
             return
+        if not self.ffmpeg_path:
+            messagebox.showwarning("FFmpeg non trovato",
+                "FFmpeg non è nel PATH. L'export userà OpenCV (più lento).\n"
+                "Per export veloce: installa FFmpeg e aggiungilo al PATH.")
 
         # Trova video nei layer
         video_layers = [layer for layer in self.layers if hasattr(layer, 'is_video') and layer.is_video]
@@ -2033,48 +2971,126 @@ class RConverter:
             messagebox.showwarning("Avviso", "Nessun video caricato. Per esportare video carica almeno un file video.")
             return
 
-        fmt = self.video_format.get()
-        ext = f".{fmt}"
+        profile = get_export_profile(
+            self.led_wall_var.get(), self.software_target_var.get(), self.output_hz.get(),
+            custom_presets=self.custom_presets
+        )
+        container = profile["video"].get("container", "mp4")
+        ext = ".mov" if container == "mov" else ".mp4"
+        fmt = "MOV" if container == "mov" else "MP4"
 
         filepath = filedialog.asksaveasfilename(
             title="Salva video",
             defaultextension=ext,
             initialfile=f"video_output{ext}",
-            filetypes=[(fmt.upper(), f"*{ext}")]
+            filetypes=[(fmt, f"*{ext}"), ("Tutti", "*.*")]
         )
 
         if not filepath:
             return
+        out_dir = Path(filepath).parent
+        if not out_dir.exists():
+            messagebox.showerror("Errore", f"Cartella di destinazione non esiste:\n{out_dir}")
+            return
 
         self.progress.start()
-        thread = threading.Thread(target=self._do_export_video, args=(filepath, video_layers[0]), daemon=True)
+        thread = threading.Thread(target=self._do_export_video, args=(filepath, self.layers), daemon=True)
         thread.start()
+
+    def _build_ffmpeg_video_command(self, filepath, output_w, output_h, fps, profile, ext):
+        """Costruisce comando FFmpeg per export video broadcast.
+        HAP: -an (no audio). ProRes: -vendor apl0 solo per Millumin. DNxHR: profilo, no bitrate.
+        """
+        if not self.ffmpeg_path:
+            return None
+        v = profile["video"]
+        software = profile.get("software_target", "resolume")
+        cmd = [self.ffmpeg_path, "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
+               "-s", f"{output_w}x{output_h}", "-r", str(fps), "-i", "pipe:0"]
+        codec = v.get("codec", "libx264")
+        pf = v.get("pixel_format", "yuv420p")
+        container = v.get("container", "mp4")
+        if codec == "hap" or v.get("format_name") in ("hap", "hap_q"):
+            fmt_hap = v.get("format_name", "hap")
+            cmd.extend(["-c:v", "hap", "-format", fmt_hap, "-an"])
+        elif codec == "dnxhd":
+            cmd.extend(["-c:v", "dnxhd", "-profile:v", v.get("profile", "dnxhr_hq")])
+            if software != "vmix":
+                cmd.append("-an")
+            else:
+                cmd.extend(["-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"])
+        elif "prores" in codec:
+            cmd.extend(["-c:v", "prores_ks", "-profile:v", v.get("profile", "2"),
+                        "-pix_fmt", "yuv422p10le"])
+            if software == "millumin":
+                cmd.extend(["-vendor", "apl0"])
+            cmd.extend(["-c:a", "pcm_s24le", "-ar", "48000", "-ac", "2"])
+        elif codec == "libx265":
+            denom = max(1920 * 1080, 1)
+            br = int(v.get("bitrate_1080p_mbps", 140) * (output_w * output_h) / denom)
+            cmd.extend(["-c:v", "libx265", "-preset", v.get("preset", "medium"),
+                        "-x265-params", f"vbv-maxrate={br}:vbv-bufsize={br}"])
+            cmd.extend(["-c:a", "aac", "-b:a", "320k", "-ar", "48000"])
+        else:
+            denom = max(1920 * 1080, 1)
+            br = int(v.get("bitrate_1080p_mbps", 200) * (output_w * output_h) / denom) * 1000
+            cmd.extend(["-c:v", "libx264", "-preset", v.get("preset", "fast"),
+                        "-profile:v", "high", "-b:v", f"{br}", "-maxrate", f"{br}", "-bufsize", f"{br*2}"])
+            cmd.extend(["-c:a", "aac", "-b:a", "320k", "-ar", "48000"])
+        if ext == ".mov" or container == "mov":
+            cmd.extend(["-f", "mov"])
+        cmd.append(filepath)
+        return cmd
 
     def _do_export_image(self, filepath):
         try:
-            # Snapshot dei valori dal thread principale (thread-safety)
-            # NOTA: .get() su IntVar/StringVar è thread-safe in Tkinter CPython
+            # Snapshot completo contesto (thread-safety, lettura una sola volta)
             output_w = self.output_width.get()
             output_h = self.output_height.get()
-            quality = self.img_quality.get()
+            proc_int = self.proc_intensity.get() / 100.0
+            led_key = self.led_wall_var.get()
+            sw_key = self.software_target_var.get()
+            hz_val = self.output_hz.get()
+            custom = self.custom_presets
 
-            logger.info(f"Export immagine: {output_w}x{output_h} -> {filepath}")
+            profile = get_export_profile(led_key, sw_key, hz_val, custom_presets=custom)
+            quality = profile.get("image_quality_pct", 95)
+            bit_depth = profile.get("image_bit_depth", 16)
+            dpi = profile.get("image_dpi", 150)
+            compress = profile.get("image_compression", 3)
+            filters = profile.get("filters", {})
 
-            # Usa for_export=True per qualità massima
+            if not (64 <= output_w <= 8192 and 64 <= output_h <= 8192):
+                raise ValueError(f"Risoluzione non valida: {output_w}x{output_h}")
+
+            logger.info(f"Export immagine: {output_w}x{output_h} -> {filepath} (profilo: {quality}%, {bit_depth}bit)")
+
+            # Composito + processing broadcast (filtri dal preset LED wall)
             img = self.create_composite_image(output_w, output_h, for_export=True)
+            img = self._apply_image_processing(img, filters, intensity=proc_int)
             ext = Path(filepath).suffix.lower()
 
             if ext in ['.jpg', '.jpeg']:
-                img.convert('RGB').save(filepath, 'JPEG', quality=quality, optimize=True)
+                img.convert('RGB').save(filepath, 'JPEG', quality=quality, optimize=True,
+                                        dpi=(dpi, dpi))
             elif ext == '.png':
-                img.save(filepath, 'PNG', optimize=True)
+                if bit_depth >= 16:
+                    if img.mode == 'RGB':
+                        img = img.convert('RGBA')
+                    elif img.mode not in ('RGBA', 'LA'):
+                        img = img.convert('RGBA')
+                img.info['dpi'] = (dpi, dpi)
+                img.save(filepath, 'PNG', optimize=True, compress_level=min(9, max(0, compress)))
             elif ext == '.webp':
                 img.save(filepath, 'WEBP', quality=quality)
             else:
                 img.save(filepath)
 
             file_size = Path(filepath).stat().st_size
-            logger.info(f"Export completato: {file_size / 1024:.1f} KB")
+            size_str = f"{file_size / 1024:.1f} KB" if file_size < 1048576 else f"{file_size / 1048576:.2f} MB"
+            logger.info(f"Export completato: {size_str} | {output_w}x{output_h} | {bit_depth}bit | {dpi}dpi | {ext}")
+            del img
+            gc.collect()
 
             self.root.after(0, lambda: self.progress.stop())
             self.root.after(0, lambda: messagebox.showinfo("Successo", f"Collage salvato:\n{filepath}"))
@@ -2083,62 +3099,64 @@ class RConverter:
             self.root.after(0, lambda: self.progress.stop())
             self.root.after(0, lambda err=str(ex): messagebox.showerror("Errore", err))
 
-    def _do_export_video(self, filepath, video_layer):
-        """Esporta video con tutte le trasformazioni applicate"""
-        cap = None
+    def _do_export_video(self, filepath, all_layers):
+        """Esporta video composito di TUTTI i layer (immagini + video)"""
+        caps = {}
         out = None
         try:
+            # Snapshot contesto (thread-safety, lettura una sola volta)
             output_w = self.output_width.get()
             output_h = self.output_height.get()
-            fps = self.fps_var.get()
+            fps = max(1, self.fps_var.get())
             ext = Path(filepath).suffix.lower()
+            led_key = self.led_wall_var.get()
+            sw_key = self.software_target_var.get()
+            hz_val = self.output_hz.get()
+            profile = get_export_profile(led_key, sw_key, hz_val, custom_presets=self.custom_presets)
 
-            logger.info(f"Export video: {output_w}x{output_h} @ {fps}fps -> {filepath}")
+            video_layers = [l for l in all_layers if getattr(l, 'is_video', False) and l.is_video]
+            if not video_layers:
+                raise Exception("Nessun layer video nel progetto")
 
-            cap = cv2.VideoCapture(video_layer.video_path)
-            if not cap.isOpened():
-                raise Exception("Impossibile aprire il video sorgente")
+            for layer in video_layers:
+                vpath = getattr(layer, 'video_path', None)
+                if not vpath or not os.path.isfile(vpath):
+                    raise Exception(f"File video non valido: {vpath}")
+                cap = cv2.VideoCapture(vpath)
+                if not cap.isOpened():
+                    raise Exception(f"Impossibile aprire video: {vpath}")
+                caps[layer] = cap
 
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            total_frames = max((int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) for cap in caps.values()), default=0)
+            total_frames = min(max(1, total_frames), 3000)  # Limite GIF, evita div-by-zero in progress
+            last_frame = {}  # Ultimo frame per video più corti
 
-            # Pre-calcola trasformazioni costanti (snapshot thread-safe)
-            needs_flip_h = video_layer.flip_h
-            needs_flip_v = video_layer.flip_v
-            rotation = video_layer.rotation
-            zoom = video_layer.zoom / 100.0
-            offset_x = video_layer.offset_x
-            offset_y = video_layer.offset_y
-            bg_color = self.bg_color_var.get()
+            logger.info(f"Export composito: {output_w}x{output_h} @ {fps}fps, {len(all_layers)} layer -> {filepath}")
 
-            # Codec in base al formato
-            if ext == '.mp4':
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            elif ext == '.avi':
-                fourcc = cv2.VideoWriter_fourcc(*'XVID')
-            elif ext == '.webm':
-                fourcc = cv2.VideoWriter_fourcc(*'VP80')
-            elif ext == '.gif':
-                # Per GIF: processa a blocchi per limitare uso memoria
+            def make_composite_frame(video_frame_overrides):
+                """Crea il composito di tutti i layer con override per i video"""
+                return self.create_composite_image(output_w, output_h, for_export=True,
+                                                   video_frame_overrides=video_frame_overrides)
+
+            if ext == '.gif':
                 frames = []
                 frame_count = 0
-                GIF_MAX_FRAMES = 3000  # Limite sicurezza memoria
+                GIF_MAX_FRAMES = 3000
 
-                while frame_count < GIF_MAX_FRAMES:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
+                while frame_count < min(GIF_MAX_FRAMES, total_frames):
+                    video_frame_overrides = {}
+                    for layer, cap in caps.items():
+                        ret, frame = cap.read()
+                        if ret:
+                            pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                            video_frame_overrides[layer] = pil_frame
+                            last_frame[layer] = pil_frame
+                        elif layer in last_frame:
+                            video_frame_overrides[layer] = last_frame[layer]
 
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    pil_frame = Image.fromarray(frame_rgb)
-                    processed = self._process_video_frame_optimized(
-                        pil_frame, output_w, output_h,
-                        needs_flip_h, needs_flip_v, rotation, zoom,
-                        offset_x, offset_y, bg_color
-                    )
-
-                    # Quantizza subito per risparmiare memoria (~75% in meno per frame)
-                    frames.append(processed.quantize(colors=256, method=Image.Quantize.MEDIANCUT))
-                    del processed, pil_frame  # Rilascio esplicito
+                    composite = make_composite_frame(video_frame_overrides)
+                    frames.append(composite.quantize(colors=256, method=Image.Quantize.MEDIANCUT))
+                    del composite
                     frame_count += 1
 
                     if frame_count % 10 == 0:
@@ -2146,47 +3164,102 @@ class RConverter:
                         self.root.after(0, lambda p=progress_pct:
                                        self.info_label.config(text=f"Esportazione GIF: {p}%"))
 
-                cap.release()
-                cap = None
+                for cap in caps.values():
+                    cap.release()
+                caps.clear()
 
                 if frames:
                     frames[0].save(filepath, save_all=True, append_images=frames[1:],
                                    duration=int(1000 / max(fps, 1)), loop=0, optimize=True)
-                    # Rilascia memoria GIF
                     del frames
                     gc.collect()
 
-                logger.info(f"GIF esportata: {frame_count} frames")
+                logger.info(f"GIF esportata: {frame_count} frames (composito completo)")
                 self.root.after(0, lambda: self.progress.stop())
                 self.root.after(0, lambda: self.info_label.config(text=""))
                 self.root.after(0, lambda: messagebox.showinfo("Successo", f"GIF salvata:\n{filepath}\n{frame_count} frames"))
                 return
-            else:
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
+            # MP4/AVI/WEBM: usa FFmpeg se disponibile (10-50x più veloce), altrimenti OpenCV
+            ff_cmd = self._build_ffmpeg_video_command(filepath, output_w, output_h, fps, profile, ext)
+            if ff_cmd and ext != '.gif':
+                # Export via FFmpeg pipe (molto più veloce)
+                try:
+                    creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if sys.platform == 'win32' else 0
+                    proc = subprocess.Popen(ff_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            creationflags=creationflags)
+                    frame_count = 0
+                    frame_bytes = output_w * output_h * 3
+                    while frame_count < total_frames:
+                        video_frame_overrides = {}
+                        for layer, cap in caps.items():
+                            ret, frame = cap.read()
+                            if ret:
+                                pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                                video_frame_overrides[layer] = pil_frame
+                                last_frame[layer] = pil_frame
+                            elif layer in last_frame:
+                                video_frame_overrides[layer] = last_frame[layer]
+                        composite = make_composite_frame(video_frame_overrides)
+                        rgb = np.array(composite)
+                        proc.stdin.write(rgb.tobytes())
+                        del composite
+                        frame_count += 1
+                        if frame_count % 30 == 0:
+                            pct = int((frame_count / max(total_frames, 1)) * 100)
+                            self.root.after(0, lambda p=pct: self.info_label.config(text=f"FFmpeg: {p}%"))
+                    proc.stdin.close()
+                    proc.wait(timeout=120)
+                    if proc.returncode != 0:
+                        err = proc.stderr.read().decode(errors='replace')[-500:]
+                        raise Exception(f"FFmpeg errore: {err}")
+                    for cap in caps.values():
+                        cap.release()
+                    caps.clear()
+                    logger.info(f"Video FFmpeg: {frame_count} frames")
+                    gc.collect()
+                    self.root.after(0, lambda: self.progress.stop())
+                    self.root.after(0, lambda: self.info_label.config(text=""))
+                    self.root.after(0, lambda: messagebox.showinfo("Successo", f"Video salvato:\n{filepath}\n{frame_count} frames"))
+                    return
+                except Exception as ff_ex:
+                    logger.warning(f"FFmpeg fallback a OpenCV: {ff_ex}")
+                    for cap in caps.values():
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    # Ricrea caps se necessario (alcuni non supportano seek)
+                    for layer in list(caps.keys()):
+                        caps[layer].release()
+                    caps.clear()
+                    for layer in video_layers:
+                        cap = cv2.VideoCapture(layer.video_path)
+                        if cap.isOpened():
+                            caps[layer] = cap
+
+            # Fallback OpenCV
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v') if ext == '.mp4' else \
+                     cv2.VideoWriter_fourcc(*'XVID') if ext == '.avi' else \
+                     cv2.VideoWriter_fourcc(*'VP80') if ext == '.webm' else \
+                     cv2.VideoWriter_fourcc(*'mp4v')
             out = cv2.VideoWriter(filepath, fourcc, fps, (output_w, output_h))
             if not out.isOpened():
                 raise Exception("Impossibile creare il file video di output")
 
             frame_count = 0
+            while frame_count < total_frames:
+                video_frame_overrides = {}
+                for layer, cap in caps.items():
+                    ret, frame = cap.read()
+                    if ret:
+                        pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                        video_frame_overrides[layer] = pil_frame
+                        last_frame[layer] = pil_frame
+                    elif layer in last_frame:
+                        video_frame_overrides[layer] = last_frame[layer]
 
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                pil_frame = Image.fromarray(frame_rgb)
-
-                processed = self._process_video_frame_optimized(
-                    pil_frame, output_w, output_h,
-                    needs_flip_h, needs_flip_v, rotation, zoom,
-                    offset_x, offset_y, bg_color
-                )
-
-                output_frame = cv2.cvtColor(np.array(processed), cv2.COLOR_RGB2BGR)
+                composite = make_composite_frame(video_frame_overrides)
+                output_frame = cv2.cvtColor(np.array(composite), cv2.COLOR_RGB2BGR)
                 out.write(output_frame)
-
+                del composite
                 frame_count += 1
 
                 if frame_count % 30 == 0:
@@ -2194,7 +3267,8 @@ class RConverter:
                     self.root.after(0, lambda p=progress_pct:
                                    self.info_label.config(text=f"Esportazione video: {p}%"))
 
-            logger.info(f"Video esportato: {frame_count} frames")
+            logger.info(f"Video esportato: {frame_count} frames (composito completo)")
+            gc.collect()
             self.root.after(0, lambda: self.progress.stop())
             self.root.after(0, lambda: self.info_label.config(text=""))
             self.root.after(0, lambda: messagebox.showinfo("Successo", f"Video salvato:\n{filepath}\n{frame_count} frames"))
@@ -2205,7 +3279,7 @@ class RConverter:
             self.root.after(0, lambda: self.info_label.config(text=""))
             self.root.after(0, lambda err=str(ex): messagebox.showerror("Errore", err))
         finally:
-            if cap is not None:
+            for cap in caps.values():
                 cap.release()
             if out is not None:
                 out.release()

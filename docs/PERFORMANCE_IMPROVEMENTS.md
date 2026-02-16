@@ -1,6 +1,6 @@
 # R-Converter - Suggerimenti Performance e Stabilita
 
-> Analisi approfondita del codice `main.py` v1.3.1
+> Analisi approfondita del codice `main.py` v2.0.0 PRO
 > Data: 11 febbraio 2026
 
 ---

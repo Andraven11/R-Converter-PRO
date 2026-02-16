@@ -1,11 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 # R-Converter — Versione Portable (onefile = singolo .exe)
-# Build: python -m PyInstaller R-Converter_Portable.spec --noconfirm --clean
+# Build: python _download_ffmpeg_build.py && python -m PyInstaller R-Converter_Portable.spec --noconfirm --clean
 
 from PyInstaller.utils.hooks import collect_all
+from pathlib import Path
 
 datas = []
 binaries = []
+# FFmpeg bundled (eseguire _download_ffmpeg_build.py prima della build)
+_ffmpeg_dir = Path("ffmpeg")
+if (_ffmpeg_dir / "bin" / "ffmpeg.exe").exists():
+    datas.append((str(_ffmpeg_dir), "ffmpeg"))
 hiddenimports = [
     'PIL', 'PIL.Image', 'PIL.ImageTk',
     'cv2', 'numpy',

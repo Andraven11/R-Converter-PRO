@@ -1,8 +1,8 @@
-# R-Converter
+# R-Converter PRO
 
-**Convertitore di Immagini e Video con supporto Multi-Layer Collage**
+**Convertitore Broadcast per LED Wall - Immagini e Video Multi-Layer**
 
-> Versione 1.3.1 | Python 3.8+ | Windows 10/11
+> Versione 2.0.0 PRO | Python 3.8+ | Windows 10/11
 
 ---
 
@@ -195,7 +195,7 @@ R-Converter/
 ├── icon.ico                   # Icona applicazione
 ├── R-Converter.spec           # PyInstaller spec (installer, onedir)
 ├── R-Converter_Portable.spec  # PyInstaller spec (portable, onefile)
-├── installer.iss              # Inno Setup script (v1.3.1)
+├── installer.iss              # Inno Setup script (v2.0.0)
 ├── _clean_and_build.bat       # Build completa (clean + installer + portable)
 ├── _build_setup.bat           # Solo generazione setup (richiede dist/)
 ├── docs/                      # Documentazione tecnica
@@ -337,22 +337,21 @@ python -m PyInstaller R-Converter.spec --noconfirm --clean
 Output: `dist/R-Converter/` (cartella con exe + DLL)
 
 Poi compilare l'installer: aprire `installer.iss` con Inno Setup Compiler (Ctrl+F9).
-Output installer: `installer_output/R-Converter_Setup_v1.3.1.exe`
+Output installer: `installer_output/R-Converter_PRO_Setup_v2.0.0.exe`
 
-### Entrambe le versioni
+### Comando: `.\_clean_and_build.bat`
 
-```bash
-python build_exe.py
-# -> Scegli opzione 3
-```
+PowerShell richiede `.\` per eseguire script nella cartella corrente.
 
-### Differenze tra versioni
+### Portable vs Installer
+
+**Funzionalità identiche**: stesso codice, stesso FFmpeg bundled, stesse feature broadcast.
 
 | Aspetto | Installer | Portable |
 |---------|-----------|----------|
 | Formato | Cartella + Inno Setup | Singolo .exe |
 | Avvio | Immediato | ~3-5 secondi (estrazione) |
-| Dimensione | ~65MB installato | ~65MB singolo file |
+| Dimensione | ~100MB con FFmpeg | ~100MB singolo file |
 | Drag & Drop | windnd | windnd |
 | Icona desktop | Si (opzionale) | No (portatile) |
 | Menu Start | Si | No |

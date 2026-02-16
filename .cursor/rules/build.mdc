@@ -1,79 +1,78 @@
 ---
-description: Regole per build e distribuzione R-Converter
+description: Regole per build e distribuzione R-Converter PRO
 globs: "*.spec,build_exe.py,installer.iss,*.bat"
 alwaysApply: false
 ---
 
-# R-Converter - Regole Build
+# R-Converter PRO - Regole Build
 
 ## Comandi Build
 
-IMPORTANTE: usare sempre `python -m PyInstaller` (non `pyinstaller` diretto, che potrebbe non essere nel PATH su installazioni utente).
+IMPORTANTE: usare sempre `python -m PyInstaller` (non `pyinstaller` diretto).
 
 ### Build rapida (doppio click)
 `_clean_and_build.bat`: pulisce, builda installer (onedir), portable (onefile), setup Inno (se ISCC nel PATH).
-`_build_setup.bat`: solo generazione setup. PREREQUISITO: eseguire prima build installer (dist/R-Converter/ deve esistere).
+`_build_setup.bat`: solo generazione setup. PREREQUISITO: dist/R-Converter/ deve esistere.
 
 ### Versione Installer (per Inno Setup)
 ```bash
 python -m PyInstaller R-Converter.spec --noconfirm --clean
 ```
-Output: `dist/R-Converter/R-Converter.exe` (cartella con tutte le DLL)
+Output: `dist/R-Converter/R-Converter.exe` (cartella con DLL)
 
 ### Versione Portable (singolo .exe)
 ```bash
 python -m PyInstaller R-Converter_Portable.spec --noconfirm --clean
 ```
-Output: `dist/R-Converter_Portable.exe` (singolo file eseguibile)
+Output: `dist/R-Converter_Portable.exe`
 
 ### Installer Windows
-Compilare `installer.iss` con Inno Setup Compiler (Ctrl+F9) dopo la build della versione installer.
-Output: `installer_output/R-Converter_Setup_v1.3.1.exe`
+Compilare `installer.iss` con Inno Setup Compiler (Ctrl+F9) dopo la build.
+Output: `installer_output/R-Converter_PRO_Setup_v2.0.0.exe`
 
 ## Regole CRITICHE
 
+### FFmpeg (BUNDLED in installer e portable)
+- FFmpeg essentials (~31 MB) incluso in entrambe le build
+- Prima della build: eseguire `python _download_ffmpeg_build.py` per scaricare ffmpeg/bin/
+- Spec: datas con ffmpeg/ se ffmpeg/bin/ffmpeg.exe esiste
+- Percorsi ricerca: bundled (sys._MEIPASS o exe parent) -> LOCALAPPDATA/R-Converter/ffmpeg -> PATH -> cartelle note
+- Check for Update: scarica FFmpeg da gyan.dev se mancante o codec incompleti
+
 ### Drag & Drop (portable funzionante)
-- windnd (hook Python) - funziona con --onefile perche' Python puro (no DLL native)
+- windnd (hook Python) - funziona con --onefile
 - MAI subclassing WNDPROC Win32: crasha Tkinter
 - collect_all('windnd') OBBLIGATORIO in entrambi i spec
-- Setup ritardato 500ms (root.after) - dare tempo alla finestra
+- Setup ritardato 500ms (root.after)
 - Hidden imports: windnd, windnd.windnd, ctypes, ctypes.wintypes
 
 ### Spec Files
 - icon.ico in root (obbligatorio)
-- Hidden imports: PIL, PIL.Image, PIL.ImageTk, cv2, numpy, windnd, windnd.windnd, ctypes, ctypes.wintypes
+- Hidden imports: PIL, PIL.Image, PIL.ImageTk, PIL.ImageFilter, cv2, numpy, windnd, windnd.windnd, ctypes, ctypes.wintypes, json, zipfile, xml.etree.ElementTree, subprocess, re, copy, pathlib
 - collect_all('windnd') obbligatorio
 - Exclude: matplotlib, scipy, pandas, pytest, setuptools, wheel, pip
 - Optimize: 2, UPX: True, Console: False
 
-### Setup per altro PC
-Il file `installer_output/R-Converter_Setup_v1.3.1.exe` e' un installer Windows completo e autonomo:
-- Copia il file sul nuovo PC (chiavetta, cloud, rete)
-- Esegui con doppio click
-- Segui la procedura guidata: nessun Python o dipendenza da installare
-- Crea menu Start, disinstallazione, icona desktop (opzionale)
-
-### Differenze tra versioni
-| Aspetto | Setup (installer) | Portable |
-|---------|-------------------|----------|
-| File | R-Converter_Setup_v1.3.1.exe | R-Converter_Portable.exe |
-| Uso su altro PC | Copia setup, esegui, installa | Copia exe, esegui (nessuna installazione) |
-| Menu Start | Si | No |
-| Disinstallazione | Si (Pannello di controllo) | No (elimina la cartella) |
-| Drag & Drop | windnd | windnd |
-| Velocita avvio | Immediata | ~3-5 secondi (estrazione temp) |
-
-### Test Post-Build
+### Test Post-Build PRO
 Dopo ogni build, verificare:
 1. L'applicazione si avvia senza errori
-2. Il drag & drop di immagini funziona
-3. Il drag & drop di video funziona (se OpenCV incluso)
-4. L'export immagine funziona (JPG, PNG, WebP)
-5. L'export video funziona (MP4, GIF)
-6. Il file log viene creato in %LOCALAPPDATA%\R-Converter\ (NON nella cartella dell'exe)
-7. Nessun file extra viene creato nella cartella dell'exe
+2. Il drag & drop di immagini e video funziona
+3. Pannello destro: tutti i dropdown funzionano e aggiornano il riepilogo
+4. Preset LED wall: i 6 built-in sono tutti selezionabili
+5. Import preset JSON: funziona e popola il dropdown
+6. Salva preset: crea JSON in %LOCALAPPDATA%\R-Converter\presets\
+7. Export immagine (senza FFmpeg): funziona con processing attivo
+8. Export video (con FFmpeg): funziona con tutti e 5 i software target
+9. FFmpeg non trovato: messaggio chiaro, export video disabilitato
+10. Il file log viene creato in %LOCALAPPDATA%\R-Converter\ (NON nella cartella exe)
 
 ### Versioning
-- Versione corrente: 1.3.1
+- Versione corrente: 2.0.0 PRO (installer.iss MyAppVersion, _clean_and_build.bat)
 - Aggiornare in `installer.iss` (#define MyAppVersion)
 - Formato: MAJOR.MINOR.PATCH (semver)
+- Cambio major (1.x -> 2.x) perche: nuovo pannello destro, export engine broadcast, processing pipeline
+
+### Differenze tra versioni (funzionalita IDENTICA)
+- Setup: dist/R-Converter/ + Inno -> installer_output/R-Converter_PRO_Setup_v2.0.0.exe
+- Portable: dist/R-Converter_Portable.exe (onefile, singolo .exe)
+- Entrambe: stesso codice, FFmpeg bundled, windnd D&D, export broadcast identico

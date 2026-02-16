@@ -2,8 +2,8 @@
 ; Genera installer Windows professionale
 ; Richiede Inno Setup: https://jrsoftware.org/isinfo.php
 
-#define MyAppName "R-Converter"
-#define MyAppVersion "1.3.1"
+#define MyAppName "R-Converter PRO"
+#define MyAppVersion "2.0.0"
 #define MyAppPublisher "R-Converter Team"
 #define MyAppURL "https://github.com/r-converter"
 #define MyAppExeName "R-Converter.exe"

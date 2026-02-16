@@ -1,99 +1,140 @@
 ---
-description: Regole specifiche per main.py - il codice sorgente principale
+description: Regole specifiche per main.py - codice sorgente principale R-Converter PRO
 globs: "main.py"
 alwaysApply: false
 ---
 
-# R-Converter - Regole per main.py
+# R-Converter PRO - Regole per main.py
 
-## Struttura del File
-Il file `main.py` contiene tutto il codice sorgente (~2226 righe):
+## Struttura del File (~3300-3500 righe)
 
-1. **Imports, logging, costanti** (righe 1-77)
+1. **Imports, logging, costanti** (top)
    - Logging: %LOCALAPPDATA%\R-Converter\r_converter.log (mai nella cartella exe)
-   - cv2 try/except: VIDEO_SUPPORT=True/False. Se False, export video disabilitato
+   - cv2 try/except: VIDEO_SUPPORT=True/False
    - IMAGE_FORMATS, VIDEO_FORMATS (set O(1)), RESOLUTION_PRESETS, HANDLE_*
+   - HZ_PRESETS: [25, 30, 50, 60]
 
-2. **ImageLayer** (classe dati, righe 80-165)
+2. **Dati broadcast** (dopo imports)
+   - LED_WALL_SPECS: dict con i 6 preset validati su hardware reale
+   - FILTER_PROFILES: FilterConfig per ogni LED wall
+   - VIDEO_PROFILES_BASE: VideoConfig per ogni codec (DNxHR SQ/HQ/HQX, HAP, HAP Q, ProRes 422, H.264, H.265)
+   - AUDIO_PROFILES: AudioConfig (PCM 16, PCM 24, AAC 320)
+   - SOFTWARE_TARGETS: mapping software -> codec ottimale per quality tier
+
+3. **Classi dati** (dataclass-like con dict)
+   - LEDWallSpec: name, brand, receiving_card, driver_ic, pixel_pitch_mm, quality_tier, gray_depth, scan_type, scan_ratio, gamma, refresh_hz, input_signal_hz, width_px, height_px
+   - FilterConfig: deband_threshold, deband_grain, dither_type, dither_scale, black_level, white_level, denoise_strength, sharpen_amount, bilateral_sigma_s, bilateral_sigma_r
+   - VideoConfig: codec, profile, level, format_name, pixel_format, container, bitrate_mode, bitrate_1080p_mbps, bitrate_4k_mbps, gop_size, b_frames, preset, framerate
+   - AudioConfig: codec, sample_rate, bit_depth, channels, bitrate_kbps
+   - ExportProfile: combinazione di video + audio + filters + led_wall + software
+
+4. **ImageLayer** (classe dati layer)
    - Usa `__slots__` per efficienza memoria
-   - Cache trasformazioni: (rotation, flip_h, flip_v) + cache zoom (_zoom_cache, _zoom_cache_key)
-   - get_transformed_image(zoom=X) restituisce immagine gia zoomata (cache evita resize durante pan)
-   - Metodo cleanup() per rilascio risorse
+   - Cache trasformazioni: (rotation, flip_h, flip_v) + cache zoom
+   - get_transformed_image(zoom=X) con cache per pan fluido
+   - cleanup() per rilascio risorse
 
-3. **RConverter** (classe principale GUI, righe 168-2240)
-   - `__init__`: variabili stato, setup UI, D&D, _cached_canvas_size, _canvas_persistent_ids
+5. **RConverter** (classe principale GUI)
+   - `__init__`: variabili stato (incluse PRO: led_wall_var, software_target_var, output_hz, proc_*, ffmpeg_path)
    - `setup_style`: tema dark blue con palette definita
-   - `create_widgets`: layout 3 colonne (left scrollabile / canvas / right)
-   - `setup_drag_and_drop`: windnd con setup ritardato 500ms, fallback tkinterdnd2
+   - `create_widgets`: layout 3 colonne (left scrollabile / canvas / right scrollabile PRO)
+   - `create_left_panel`: INVARIATO rispetto a versione Lite
+   - `create_canvas_panel`: INVARIATO rispetto a versione Lite
+   - `create_right_panel`: RISCRITTO con 7 sezioni PRO (scrollabile)
    - Layer management: load_image, load_video, remove, move, duplicate
-   - Canvas rendering: create_composite_image(target_size=...) per preview, riuso oggetti canvas
-   - redraw_canvas: debounce 16ms/33ms (drag), mai bypass
-   - Mouse events: drag/resize/rotate con debounce
-   - Export: image (thread) + video (thread) con progress
+   - Canvas rendering: create_composite_image con target_size, riuso oggetti canvas
+   - **PRO callbacks**: on_led_wall_change, on_software_change, on_hz_change, update_export_summary
+   - **PRO preset**: save_custom_preset, load_custom_preset, import_led_config, load_saved_presets
+   - **PRO processing**: _process_image_pro (pipeline Pillow+OpenCV), _build_ffmpeg_command
+   - **PRO export**: export_project, _do_export_project (thread), _run_ffmpeg
 
-4. **main()** (righe 2212-2225)
-   - Entry point, centramento finestra
+6. **main()** - Entry point
 
 ## Pattern da Seguire
 
-### Aggiungere un nuovo controllo UI
-1. Creare widget nel metodo create_*_panel appropriato
-2. Collegare variabile Tkinter (IntVar/StringVar/BooleanVar)
-3. Aggiungere handler/callback con gestione errori
-4. Chiamare redraw_canvas() dopo modifiche visive
+### Pannello destro PRO - 7 sezioni (in ordine)
+1. Dimensioni Output + Hz (dropdown Hz aggiunto sotto W/H)
+2. Sfondo (griglia colori - invariato)
+3. LED Wall / Receiver Card (dropdown 6 preset + custom + import)
+4. Software Target (dropdown 5 opzioni)
+5. Processing Pre-Export (4 checkbox + slider intensita)
+6. Riepilogo Export (auto-aggiornante, read-only)
+7. Export Composito (pulsante + progress bar + stato)
 
-### Aggiungere una nuova trasformazione layer
-1. Aggiungere attributo in ImageLayer.__slots__
-2. Inizializzare in ImageLayer.__init__
-3. Applicare in ImageLayer.get_transformed_image() (aggiornare base_key e zoom_key)
-4. Aggiornare cache_key se influenza il rendering; invalidate_cache() per _zoom_cache
-5. Aggiungere controllo UI nel pannello sinistro
-6. Gestire in _process_video_frame_optimized per export video
+### Dropdown a cascata - Regola di aggiornamento
+Ogni cambio di LED Wall, Software o Hz deve chiamare `update_export_summary()` che:
+1. Legge le 3 selezioni correnti
+2. Calcola il profilo export ottimale (get_current_export_profile)
+3. Aggiorna il pannello Riepilogo con codec, bitrate, audio, FPS, filtri
 
-### Ottimizzazioni Performance (non modificare senza motivo)
-- create_composite_image: target_size per preview (evita resize 4K->preview)
-- get_transformed_image(zoom=X): cache zoom per pan fluido
-- _cached_canvas_size: evita update_idletasks nel hot path
-- _canvas_persistent_ids: riuso bg/img/border invece di delete/create
-- Vedi docs/PERFORMANCE_IMPROVEMENTS.md per analisi colli di bottiglia
+### Aggiungere un nuovo preset LED wall
+1. Aggiungere entry in LED_WALL_SPECS con tutti i campi
+2. Aggiungere entry corrispondente in FILTER_PROFILES
+3. Il software target determina automaticamente il codec tramite la matrice quality_tier x software
+
+### Export broadcast - Pipeline
+```
+Per ogni layer:
+  1. Resize alla risoluzione output (Lanczos up, Lanczos down)
+  2. Deband (se checkbox attivo): numpy gradient threshold
+  3. Color Levels: numpy clip + remap
+  4. Bilateral Filter (se checkbox attivo): cv2.bilateralFilter(d=5)
+  5. Sharpen: PIL UnsharpMask adattivo
+  6. Dither: per conversioni bit depth
+
+Compositing:
+  7. Paste tutti i layer processati su canvas output
+  8. Conversione colore finale (Rec.709 SDR)
+
+Encoding (solo video):
+  9. FFmpeg con filter chain ottimizzata
+  10. Codec/container dal software target
+  11. Audio dal quality tier
+```
 
 ### Export in thread separato
 ```python
-def export_something(self):
+def export_project(self):
     # Validazione nel main thread
     if not self.layers:
         return
+    filepath = filedialog.asksaveasfilename(...)
+    if not filepath:
+        return
     self.progress.start()
-    thread = threading.Thread(target=self._do_export_something, args=(...,), daemon=True)
+    thread = threading.Thread(target=self._do_export_project, args=(filepath,), daemon=True)
     thread.start()
 
-def _do_export_something(self, ...):
+def _do_export_project(self, filepath):
     try:
+        profile = self.get_current_export_profile()
         # Snapshot variabili (thread-safe)
         output_w = self.output_width.get()
-        # ... lavoro pesante ...
-        logger.info("Export completato")
+        # ... processing + compositing + encoding ...
         self.root.after(0, lambda: self.progress.stop())
         self.root.after(0, lambda: messagebox.showinfo("Successo", "..."))
     except Exception as ex:
-        logger.error(f"Errore: {ex}")
+        logger.error(f"Errore export: {ex}")
         self.root.after(0, lambda: self.progress.stop())
         self.root.after(0, lambda err=str(ex): messagebox.showerror("Errore", err))
 ```
 
-### Drag & Drop
-- setup_drag_and_drop() schedula _do_setup_drag_and_drop() con after(500ms)
-- _do_setup_drag_and_drop() prova windnd, poi tkinterdnd2
-- _on_drop_windnd() decodifica bytes (utf-8/cp1252) e chiama _process_dropped_files()
-- _process_dropped_files() valida file e chiama load_image/load_video
-- MAI fare subclassing Win32 WNDPROC con Tkinter
+### FFmpeg - Regole critiche
+- Cercare ffmpeg nel PATH, poi in cartelle note (C:\ffmpeg\bin, %PROGRAMFILES%\ffmpeg\bin)
+- Se non trovato: disabilitare export video, abilitare solo export immagine
+- Progress: parsare stderr (`time=HH:MM:SS.ms`) per percentuale
+- Timeout: 30 minuti max per singolo file, poi kill
+- Errori: catturare stderr completo, loggare, mostrare messaggio utente comprensibile
 
-### Logging
-- `logger.info()` per operazioni normali (caricamento, export, D&D setup)
-- `logger.warning()` per situazioni anomale non bloccanti (file non valido, fallback)
-- `logger.error()` per errori che richiedono attenzione (crash D&D, export fallito)
+### Filtri broadcast - Parametri calcolati
+- deband threshold: valore dal preset LED, normalizzato per FFmpeg (intero 0-255 o float 0-1 a seconda della versione)
+- denoise (hqdn3d): luma = int(4 * denoise_strength), chroma = int(3 * denoise_strength)
+- color levels: black = black_level/255, white = white_level/255
+- sharpen (unsharp): amount dal preset, raggio 3, threshold adattivo
+- bilateral: sigmaS e sigmaR dal preset LED
+- dither: tipo bayer con scala dal preset, applicato solo su conversione pixel format
 
-## Palette Colori
+## Palette Colori (invariata + nuovi stili)
 ```python
 bg_color      = "#0a1929"   # Sfondo principale
 bg_secondary  = "#132f4c"   # Sfondo secondario
@@ -101,14 +142,22 @@ bg_tertiary   = "#1a3a5c"   # Hover
 fg_color      = "#e3f2fd"   # Testo primario
 fg_secondary  = "#90caf9"   # Testo secondario
 accent_color  = "#29b6f6"   # Accento cyan
-success_color = "#66bb6a"   # Verde export immagine
+success_color = "#66bb6a"   # Verde export
 video_color   = "#7c4dff"   # Viola export video
 border_color  = "#1e4976"   # Bordi
+broadcast_color = "#ff6f00" # Arancio per sezione broadcast/LED
 
-# Sezioni pannello sinistro
-layers    = "#1a365d" / "#3182ce"   # Blu navy / bordo blu
-transform = "#0f2840" / "#1e88e5"   # Blu scuro / bordo blu
-size      = "#1e4a3d" / "#26a69a"   # Teal scuro / bordo teal
-fit       = "#2d1f47" / "#7c4dff"   # Viola scuro / bordo viola
-mirror    = "#3d2a1f" / "#ff7043"   # Marrone / bordo arancio
+# Sezioni pannello sinistro (invariate)
+layers    = "#1a365d" / "#3182ce"
+transform = "#0f2840" / "#1e88e5"
+size      = "#1e4a3d" / "#26a69a"
+fit       = "#2d1f47" / "#7c4dff"
+mirror    = "#3d2a1f" / "#ff7043"
+
+# Sezioni pannello destro PRO (nuove)
+ledwall   = "#1a2f1a" / "#4caf50"   # Verde scuro / bordo verde (hardware)
+software  = "#2a1a3d" / "#9c27b0"   # Viola scuro / bordo viola (software)
+processing= "#3d2a0a" / "#ff9800"   # Ambra scuro / bordo ambra (processing)
+summary   = "#0a2a3d" / "#00bcd4"   # Cyan scuro / bordo cyan (riepilogo)
+export_pro= "#3d0a0a" / "#f44336"   # Rosso scuro / bordo rosso (export)
 ```

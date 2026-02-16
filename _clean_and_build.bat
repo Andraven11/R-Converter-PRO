@@ -1,6 +1,6 @@
 @echo off
 echo ============================================
-echo   R-Converter v1.3.1 - Clean + Build
+echo   R-Converter PRO v2.0.0 - Clean + Build
 echo ============================================
 echo.
 
@@ -20,6 +20,14 @@ if %ERRORLEVEL% neq 0 (
     pip install pyinstaller
 )
 
+echo.
+echo --- Download FFmpeg (per bundle) ---
+python _download_ffmpeg_build.py
+if %ERRORLEVEL% neq 0 (
+    echo [AVVISO] Download FFmpeg fallito. Build senza FFmpeg bundled.
+) else (
+    echo [OK] FFmpeg pronto per la build
+)
 echo.
 echo --- Pulizia vecchie build ---
 if exist "dist" (
@@ -78,7 +86,7 @@ if exist "C:\Program Files\Inno Setup 6\ISCC.exe" set ISCC=C:\Program Files\Inno
 if defined ISCC (
     "%ISCC%" installer.iss
     if %ERRORLEVEL% equ 0 (
-        echo [OK] Setup creato in installer_output\R-Converter_Setup_v1.3.1.exe
+        echo [OK] Setup creato in installer_output\R-Converter_PRO_Setup_v2.0.0.exe
     ) else (
         echo [ERRORE] Compilazione Inno Setup fallita
     )
@@ -102,11 +110,11 @@ if exist "dist\R-Converter_Portable.exe" (
 )
 echo.
 echo Setup installabile (per altro PC):
-if exist "installer_output\R-Converter_Setup_v1.3.1.exe" (
-    for %%F in ("installer_output\R-Converter_Setup_v1.3.1.exe") do echo    installer_output\R-Converter_Setup_v1.3.1.exe  [%%~zF bytes]
+if exist "installer_output\R-Converter_PRO_Setup_v2.0.0.exe" (
+    for %%F in ("installer_output\R-Converter_PRO_Setup_v2.0.0.exe") do echo    installer_output\R-Converter_PRO_Setup_v2.0.0.exe  [%%~zF bytes]
     echo    Esegui su altro PC per installazione completa.
 ) else (
-    echo    installer_output\R-Converter_Setup_v1.3.1.exe  [compila con Inno Setup]
+    echo    installer_output\R-Converter_PRO_Setup_v2.0.0.exe  [compila con Inno Setup]
 )
 echo.
 pause
