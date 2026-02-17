@@ -36,7 +36,8 @@
 - **Pipeline ottimizzata** - Color levels, deband, denoise, bilateral, sharpen, dither Bayer
 - **Export immagine/video** - PNG/JPG, MP4/MOV/GIF con codec broadcast
 - **Color metadata bt709** - Tag corretti per Resolume/vMix/NovaStar
-- **HAP Snappy + Chunks** - Ottimizzato per Resolume GPU
+- **Verifica FFmpeg** - Controllo encoder (dnxhd, hap, prores_ks, libx264, libx265, aac) via `-encoders`
+- **HAP + Chunks dinamici** - 4 per <4K, 8 per 4K+; compatibile con FFmpeg Essentials (no libsnappy)
 
 ### UI/UX
 - Tema dark blu notte, pannello destro PRO con dropdown a cascata
@@ -180,7 +181,7 @@ R-Converter/
 - **Processing su video** - Stessi filtri dell'export immagine applicati a ogni frame (color levels, deband, denoise, bilateral, sharpen, dither Bayer)
 - **Dither Bayer** - Anti-banding per LED wall 13-14 bit gray depth
 - **Color metadata bt709** - Tag corretti per interpretazione colore su Resolume/vMix/NovaStar
-- **HAP Snappy + Chunks** - File più piccoli, decodifica parallela Resolume
+- **HAP + Chunks dinamici** - 4/8 chunks, compatibile Essentials; decodifica parallela Resolume
 - **CBR H.264/H.265** - Bitrate costante per broadcast
 - **LANCZOS export** - Qualità superiore per rotation/resize
 - **Thread-safety** - Snapshot layer, cleanup VideoCapture
@@ -203,6 +204,7 @@ R-Converter/
 ### Errori Comuni
 | Errore | Soluzione |
 |--------|-----------|
+| FFmpeg non trovato / encoder mancanti | Pulsante "Verifica FFmpeg" nell'header: scarica Essentials (~31 MB) da gyan.dev |
 | OpenCV non installato | `pip install opencv-python` |
 | Video non si carica | K-Lite Codec Pack |
 | D&D non funziona (portable) | Attendi ~1.2s dopo avvio; non eseguire come Admin |
@@ -247,7 +249,8 @@ git add -A && git commit -m "chore: descrizione" && git push
 - logger invece di print()
 
 ### Changelog
-- **v2.0.1** - Fix broadcast: processing su video, dither Bayer, color metadata bt709, HAP snappy+chunks, H.264/H.265 CBR
+- **v2.0.2** - Verifica FFmpeg: check encoder (-encoders), aac in lista, regex robusta; vMix anullsrc; HAP chunks dinamici; bilateral skip >2.5Mpx; OPT 1-5
+- **v2.0.1** - Fix broadcast: processing su video, dither Bayer, color metadata bt709, HAP chunks, H.264/H.265 CBR
 - **v2.0.0** - Pannello PRO, export broadcast, pipeline ottimizzata
 - **v1.3.1** - Fix D&D portable, log in AppData
 - **v1.3.0** - Logging, gestione errori

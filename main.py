@@ -1217,25 +1217,29 @@ class RConverter:
         logger.warning("FFmpeg non trovato - export video broadcast disabilitato")
 
     def _check_and_update_ffmpeg(self):
-        """Verifica FFmpeg/codec e scarica da internet se mancanti."""
+        """Verifica FFmpeg/encoder e scarica da internet se mancanti.
+        Usa -encoders per verificare gli encoder (non i decoder) richiesti dai preset.
+        """
         try:
             if not self.ffmpeg_path:
                 self._find_ffmpeg()
             missing = []
             if self.ffmpeg_path:
-                out2 = subprocess.run([self.ffmpeg_path, "-codecs"], capture_output=True, text=True, timeout=10,
+                out2 = subprocess.run([self.ffmpeg_path, "-encoders"], capture_output=True, text=True, timeout=10,
                                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) or 0)
-                codecs_out = (out2.stdout or "") + (out2.stderr or "")
-                required = ["dnxhd", "hap", "prores_ks", "libx264", "libx265"]
+                enc_out = (out2.stdout or "") + (out2.stderr or "")
+                # Video: Resolume (hap), vMix (dnxhd), Millumin (prores_ks), H.264/H.265 (libx264/libx265)
+                # Audio: H.264/H.265 usano aac; vMix usa pcm_s16le (sempre disponibile)
+                required = ["dnxhd", "hap", "prores_ks", "libx264", "libx265", "aac"]
                 for c in required:
-                    if f" {c} " not in codecs_out and f".{c} " not in codecs_out:
+                    if not re.search(rf"\b{re.escape(c)}\b", enc_out):
                         missing.append(c)
             needs_download = not self.ffmpeg_path or missing
             if needs_download:
                 ok = messagebox.askyesno("Verifica FFmpeg",
-                    "FFmpeg non trovato o codec mancanti.\n\n"
+                    "FFmpeg non trovato o encoder mancanti.\n\n"
                     "Scaricare FFmpeg (~31 MB) da internet?\n"
-                    "(dnxhd, hap, prores_ks, libx264, libx265)\n\n"
+                    "(dnxhd, hap, prores_ks, libx264, libx265, aac)\n\n"
                     "Build full: https://www.gyan.dev/ffmpeg/builds/")
                 if ok:
                     threading.Thread(target=self._download_ffmpeg, daemon=True).start()
@@ -1243,7 +1247,7 @@ class RConverter:
             out = subprocess.run([self.ffmpeg_path, "-version"], capture_output=True, text=True, timeout=5,
                                  creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) or 0)
             version_line = out.stdout.split("\n")[0] if out.stdout else "?"
-            messagebox.showinfo("Verifica FFmpeg", f"FFmpeg aggiornato.\n\n{version_line}\n\nTutti i codec presenti.")
+            messagebox.showinfo("Verifica FFmpeg", f"FFmpeg aggiornato.\n\n{version_line}\n\nTutti gli encoder richiesti presenti.")
             self._update_ffmpeg_status_label()
         except subprocess.TimeoutExpired:
             messagebox.showerror("Timeout", "FFmpeg non ha risposto in tempo.")
@@ -1993,10 +1997,11 @@ class RConverter:
 
         return (x, y, final_w, final_h)
 
-    def _apply_image_processing(self, img, filters, intensity=1.0, bayer_tiled=None):
+    def _apply_image_processing(self, img, filters, intensity=1.0, bayer_tiled=None, skip_bilateral=False):
         """Pipeline broadcast ottimizzata: color levels, deband, denoise, bilateral, sharpen, dither.
         OPT-3: bayer_tiled pre-calcolato evita allocazione per frame. OPT-4: sharpen+dither in numpy.
         intensity: 0-1 scala i parametri (da proc_intensity)
+        skip_bilateral: se True e risoluzione > 2.5Mpx, salta bilateral (export video, ~50-200ms/frame risparmiati)
         """
         if not filters or img is None:
             return img
@@ -2025,8 +2030,11 @@ class RConverter:
             if dn > 0.2 and VIDEO_SUPPORT:
                 k = 3 if dn < 0.5 else 5
                 bgr = cv2.medianBlur(bgr, k)
-            # 4. Bilateral (su BGR)
-            if VIDEO_SUPPORT and bgr.shape[0] * bgr.shape[1] < 4_500_000:
+            # 4. Bilateral (su BGR) - skip per export video su risoluzioni > 2.5Mpx (performance)
+            pixels = bgr.shape[0] * bgr.shape[1]
+            do_bilateral = (VIDEO_SUPPORT and pixels < 4_500_000 and
+                            not (skip_bilateral and pixels > 2_500_000))
+            if do_bilateral:
                 sigma_s = max(1, int(filters.get("bilateral_sigma_s", 2) * scale))
                 sigma_r = filters.get("bilateral_sigma_r", 0.08) * scale
                 bgr = cv2.bilateralFilter(bgr, d=5, sigmaColor=int(sigma_r * 255), sigmaSpace=sigma_s)
@@ -3102,18 +3110,26 @@ class RConverter:
         software = profile.get("software_target", "resolume")
         cmd = [self.ffmpeg_path, "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
                "-s", f"{output_w}x{output_h}", "-r", str(fps), "-i", "pipe:0"]
+        codec = v.get("codec", "libx264")
+        # vMix DNxHR: input pipe ha solo video, serve anullsrc per traccia audio silenziosa
+        if software == "vmix" and codec == "dnxhd":
+            cmd.extend(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"])
         if vf_chain:
             cmd.extend(["-vf", vf_chain])
-        codec = v.get("codec", "libx264")
         pf = v.get("pixel_format", "yuv420p")
         container = v.get("container", "mp4")
         if codec == "hap" or v.get("format_name") in ("hap", "hap_q"):
             fmt_hap = v.get("format_name", "hap")
-            chunks = v.get("hap_chunks", 8)
-            cmd.extend(["-c:v", "hap", "-format", fmt_hap,
-                        "-compressor", "snappy", "-chunks", str(chunks), "-an"])
+            base_chunks = v.get("hap_chunks", 8)
+            # Chunks dinamici: 4 per < 4K (riduce overhead, file più piccoli), 8 per 4K+
+            pixels = output_w * output_h
+            chunks = 4 if pixels < 3840 * 2160 else min(base_chunks, 8)
+            # -compressor snappy rimosso: FFmpeg usa snappy di default se disponibile;
+            # il flag può far fallire build Essentials (libsnappy mancante) -> nero in Resolume
+            cmd.extend(["-c:v", "hap", "-format", fmt_hap, "-chunks", str(chunks), "-an"])
         elif codec == "dnxhd":
-            cmd.extend(["-c:v", "dnxhd", "-profile:v", v.get("profile", "dnxhr_hq")])
+            pf_dnx = v.get("pixel_format", "yuv422p")  # dnxhr_hq=422p, dnxhr_hqx=422p10le
+            cmd.extend(["-pix_fmt", pf_dnx, "-c:v", "dnxhd", "-profile:v", v.get("profile", "dnxhr_hq")])
             if software != "vmix":
                 cmd.append("-an")
             else:
@@ -3149,6 +3165,9 @@ class RConverter:
                         "-colorspace", "bt709", "-color_range", "tv"])
         if ext == ".mov" or container == "mov":
             cmd.extend(["-f", "mov"])
+        # vMix: map video da input 0, audio da input 1 (anullsrc), -shortest = ferma quando video finisce
+        if software == "vmix" and codec == "dnxhd":
+            cmd.extend(["-map", "0:v", "-map", "1:a", "-shortest"])
         cmd.append(filepath)
         return cmd
 
@@ -3312,7 +3331,7 @@ class RConverter:
                                                             layers=all_layers)
                 if not use_ffmpeg_filters:
                     composite = self._apply_image_processing(composite, filters, intensity=proc_int,
-                                                            bayer_tiled=bayer_tiled)
+                                                            bayer_tiled=bayer_tiled, skip_bilateral=True)
                 return composite
 
             if ext == '.gif':

@@ -13,7 +13,7 @@
 | FIX-1 Processing video | CRITICO | IMPLEMENTATO | make_composite_frame + _apply_image_processing |
 | FIX-2 Dither Bayer | CRITICO | IMPLEMENTATO | passo 6 in _apply_image_processing |
 | FIX-3 Color metadata bt709 | CRITICO | IMPLEMENTATO | flag bt709/sRGB per ogni codec |
-| FIX-4 HAP Snappy + Chunks | IMPORTANTE | IMPLEMENTATO | -compressor snappy -chunks 8 |
+| FIX-4 HAP Snappy + Chunks | IMPORTANTE | AGGIORNATO | chunks dinamici 4/8, -compressor rimosso (compatibilità Essentials) |
 | FIX-5 H.265 CBR reale | IMPORTANTE | IMPLEMENTATO | -b:v + strict-cbr=1 |
 | FIX-6 H.264 bitrate | UTILE | IMPLEMENTATO | max(1000, int(br_mbps * 1000)) |
 
@@ -24,6 +24,9 @@
 | OPT-3 Cache Bayer dither | IMPORTANTE | IMPLEMENTATO | eliminazione allocazione per frame |
 | OPT-4 Riduzione conversioni colore | IMPORTANTE | IMPLEMENTATO | sharpen+dither in numpy |
 | OPT-5 Buffer producer-consumer | UTILE | IMPLEMENTATO | riduzione stalli I/O |
+| OPT-6 HAP Resolume fix | CRITICO | IMPLEMENTATO | -compressor rimosso, chunks 4 per <4K |
+| OPT-7 Bilateral skip video | IMPORTANTE | IMPLEMENTATO | skip bilateral per export video >2.5Mpx |
+| Verifica FFmpeg encoder | UTILE | IMPLEMENTATO | -encoders, aac, regex, build Essentials compatibile |
 
 ---
 
@@ -37,7 +40,7 @@
 5. [FIX-5 IMPORTANTE: H.265 non e CBR reale](#fix-5-importante-h265-non-e-cbr-reale)
 6. [FIX-6 UTILE: H.264 bitrate calcolo sospetto](#fix-6-utile-h264-bitrate-calcolo-sospetto)
 
-### Ottimizzazioni performance export (da implementare)
+### Ottimizzazioni performance export (implementate)
 7. [OPT-1 CRITICO: Pre-composito layer statici](#opt-1-critico-pre-composito-layer-statici)
 8. [OPT-2 CRITICO: Filtri broadcast via FFmpeg -vf](#opt-2-critico-filtri-broadcast-via-ffmpeg--vf)
 9. [OPT-3 IMPORTANTE: Cache matrice Bayer dither](#opt-3-importante-cache-matrice-bayer-dither)
@@ -45,6 +48,7 @@
 11. [OPT-5 UTILE: Buffer producer-consumer](#opt-5-utile-buffer-producer-consumer)
 12. [Verifica finale: checklist per test](#verifica-finale-checklist-per-test)
 13. [Ordine di implementazione](#ordine-di-implementazione)
+14. [Verifica FFmpeg encoder](#verifica-ffmpeg-encoder-feb-2026)
 
 ---
 
@@ -167,29 +171,30 @@ HAP usa RGB/sRGB (transfer function iec61966-2-1), YUV codecs usano bt709 + limi
 
 ---
 
-## FIX-4 IMPORTANTE: HAP senza Snappy e Chunks
+## FIX-4 IMPORTANTE: HAP Snappy e Chunks (AGGIORNATO Feb 2026)
 
-### Problema
+### Problema originale
 
 I profili definiscono `hap_chunks: 8` ma il comando FFmpeg non li usava.
 Mancava anche la compressione Snappy.
 
-### Impatto LED wall
+### Problema aggiuntivo (Resolume nero, file 3x)
 
-- **Senza chunks**: Resolume decodifica con un singolo thread CPU, stuttering a 3840x1152
-- **Senza Snappy**: file 20-30% piu grandi, piu I/O dal disco
+- **-compressor snappy**: FFmpeg Essentials (gyan.dev) spesso non include libsnappy. Il flag causa fallimento encoder HAP -> fallback OpenCV mp4v -> nero in Resolume.
+- **chunks=8** per 3840x1152: overhead eccessivo, file piu grandi di Alley.
 
-### Soluzione (IMPLEMENTATA)
+### Soluzione (AGGIORNATA)
 
-Sezione HAP in `_build_ffmpeg_video_command()` (riga ~3059-3063):
+- **Rimosso -compressor snappy**: FFmpeg usa snappy di default se disponibile. Il flag esplicito puo far fallire build Essentials.
+- **Chunks dinamici**: 4 per risoluzioni < 4K (3840x2160), 8 per 4K+. Riduce dimensione file e overhead.
 
 ```python
-cmd.extend(["-c:v", "hap", "-format", fmt_hap,
-            "-compressor", "snappy", "-chunks", str(chunks), "-an"])
+chunks = 4 if pixels < 3840 * 2160 else min(base_chunks, 8)
+cmd.extend(["-c:v", "hap", "-format", fmt_hap, "-chunks", str(chunks), "-an"])
 ```
 
 ### File modificato
-- `main.py`: `_build_ffmpeg_video_command()`, riga ~3059-3063
+- `main.py`: `_build_ffmpeg_video_command()`, sezione HAP
 
 ---
 
@@ -987,6 +992,75 @@ Accettabile per un'applicazione desktop broadcast (la macchina avra 16-64 GB di 
 | 30s @ 50fps, 3840x1152, 3 img + 1 video | ~8-12 min | ~2-4 min | ~30-60 sec |
 | 30s @ 50fps, 1920x1080, solo 1 video | ~3-5 min | ~2-3 min | ~15-30 sec |
 | 30s @ 50fps, 3840x1152, solo 1 video | ~5-10 min | ~4-8 min | ~30-60 sec |
+
+---
+
+## Analisi FILTER_PROFILES vs LED_WALL_SPECS (Feb 2026)
+
+Verifica correlazione filtri pre-export con specifiche receiver card e driver IC:
+
+| LED Wall | gray_depth | scan_ratio | deband_grain | dither_scale | denoise | black/white | Correlazione |
+|----------|------------|------------|--------------|--------------|---------|-------------|---------------|
+| NovaStar A5 | 13 | 1/16 | 4 | 2 | 0.40 | 3/252 | OK: entry, massimo banding |
+| NovaStar A8 | 14 | 1/16 | 3 | 2 | 0.35 | 2/253 | OK: professional |
+| NovaStar A10 | 16 | 1/32 | 2 | 1 | 0.30 | 1/254 | OK: broadcast, meno filtri |
+| Holiday Inn Uniview | 13 | 1/24 | 4 | 2 | 0.40 | 3/252 | OK: Uniview 13-bit |
+| Uniview 2.6 | 13 | 1/24 | 4 | 2 | 0.38 | 2/253 | OK: gamma 1.8 custom |
+| Wave&Co | 14 | 1/16 | 3 | 2 | 0.36 | 2/253 | OK: Colorlight |
+
+**Logica**: gray_depth basso (13) -> deband_grain alto (4), dither_scale 2. gray_depth alto (16) -> filtri leggeri. scan_ratio 1/32 (A10) -> denoise 0.30. I preset sono corretti per le receiver card.
+
+**OPT-7 Bilateral skip**: per export video con risoluzione > 2.5Mpx, bilateral viene saltato (risparmio ~50-200ms/frame). Qualita mantenuta da color levels, deband, denoise, sharpen, dither.
+
+---
+
+## Verifica preset vMix (DNxHR) - Feb 2026
+
+| Elemento | Configurazione | Stato |
+|----------|----------------|-------|
+| Profili | dnxhr_sq (entry), dnxhr_hq (pro), dnxhr_hqx (broadcast) | OK |
+| Pixel format | yuv422p (8-bit), yuv422p10le (10-bit HQX) | OK - esplicito |
+| Container | MOV | OK |
+| Color metadata | bt709, color_range tv | OK (Academy guidelines) |
+| Audio | pcm_s16le 48kHz stereo | OK - anullsrc per traccia silenziosa |
+
+**Fix applicati**: Input pipe ha solo video. Con -c:a pcm_s16le FFmpeg falliva (nessuna sorgente audio). Aggiunto: `-f lavfi -i anullsrc=r=48000:cl=stereo` + `-map 0:v -map 1:a -shortest` per mappare video da pipe e audio silenzioso da anullsrc. vMix riceve MOV con audio track (silenzio) sincronizzato alla durata video.
+
+---
+
+## Verifica FFmpeg encoder (Feb 2026)
+
+Il pulsante "Verifica FFmpeg" nell'header controlla che gli **encoder** richiesti dai preset siano disponibili.
+
+### Modifiche implementate
+
+| Aspetto | Prima | Dopo |
+|---------|-------|------|
+| Comando | `-codecs` (decoder+encoder) | `-encoders` (solo encoder) |
+| Lista | dnxhd, hap, prores_ks, libx264, libx265 | + **aac** (audio H.264/H.265) |
+| Pattern match | `" {c} "` / `".{c} "` | `re.search(rf"\b{re.escape(c)}\b", enc_out)` |
+
+### Encoder richiesti per preset
+
+| Preset | Video | Audio |
+|--------|-------|-------|
+| Resolume | hap (HAP Q) | - (no audio embedded) |
+| vMix | dnxhd (DNxHR) | pcm_s16le (sempre disponibile) |
+| Millumin | prores_ks, hap | pcm_s16le |
+| H.264 | libx264 | aac |
+| H.265 | libx265 | aac |
+
+### Build Essentials (gyan.dev)
+
+La build `ffmpeg-release-essentials.zip` (~31 MB) include tutti gli encoder richiesti:
+- **Video**: dnxhd, hap, prores_ks (interni FFmpeg), libx264, libx265
+- **Audio**: aac (encoder nativo FFmpeg)
+
+HAP-Q non richiede libsnappy (solo HAP/HAP Alpha). Il flag `-compressor snappy` è stato rimosso per compatibilità con Essentials.
+
+### File modificato
+
+- `main.py`: `_check_and_update_ffmpeg()`, riga ~1219-1252
 
 ---
 
